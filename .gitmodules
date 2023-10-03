@@ -20,3 +20,6 @@
 [submodule "testsuite/rdf-canon"]
 	path = testsuite/rdf-canon
 	url = https://github.com/w3c/rdf-canon.git
+[submodule "hdt-cpp"]
+	path = hdt-cpp
+	url = https://github.com/rdfhdt/hdt-cpp.git
