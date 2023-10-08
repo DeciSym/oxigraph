@@ -1,11 +1,11 @@
 use crate::io::{RdfFormat, RdfParser};
 use crate::model::{GraphName as OxGraphName, GraphNameRef, Quad as OxQuad};
 use crate::sparql::algebra::QueryDataset;
-use crate::sparql::dataset::DatasetView;
+use crate::sparql::dataset::KVDatasetView;
 use crate::sparql::eval::{EncodedTuple, SimpleEvaluator};
 use crate::sparql::http::Client;
 use crate::sparql::{EvaluationError, Update, UpdateOptions};
-use crate::storage::numeric_encoder::{Decoder, EncodedTerm};
+use crate::storage::numeric_encoder::{Decoder, EncodedTerm, StrLookup};
 use crate::storage::StorageWriter;
 use oxiri::Iri;
 use spargebra::algebra::{GraphPattern, GraphTarget};
@@ -121,7 +121,7 @@ impl<'a, 'b: 'a> SimpleUpdateEvaluator<'a, 'b> {
         using: &QueryDataset,
         algebra: &GraphPattern,
     ) -> Result<(), EvaluationError> {
-        let dataset = Rc::new(DatasetView::new(self.transaction.reader(), using));
+        let dataset = Rc::new(KVDatasetView::new(self.transaction.reader(), using));
         let mut pattern = sparopt::algebra::GraphPattern::from(algebra);
         if !self.options.query_options.without_optimizations {
             pattern = Optimizer::optimize_graph_pattern(sparopt::algebra::GraphPattern::Reduced {
@@ -143,14 +143,14 @@ impl<'a, 'b: 'a> SimpleUpdateEvaluator<'a, 'b> {
         for tuple in tuples {
             for quad in delete {
                 if let Some(quad) =
-                    Self::convert_ground_quad_pattern(quad, &variables, &tuple, &dataset)?
+                    Self::convert_ground_quad_pattern(quad, &variables, &tuple, &(*dataset))?
                 {
                     self.transaction.remove(quad.as_ref())?;
                 }
             }
             for quad in insert {
                 if let Some(quad) =
-                    Self::convert_quad_pattern(quad, &variables, &tuple, &dataset, &mut bnodes)?
+                    Self::convert_quad_pattern(quad, &variables, &tuple, &(*dataset), &mut bnodes)?
                 {
                     self.transaction.insert(quad.as_ref())?;
                 }
@@ -318,11 +318,11 @@ impl<'a, 'b: 'a> SimpleUpdateEvaluator<'a, 'b> {
         }
     }
 
-    fn convert_quad_pattern(
+    fn convert_quad_pattern<T: StrLookup>(
         quad: &QuadPattern,
         variables: &[Variable],
         values: &EncodedTuple,
-        dataset: &DatasetView,
+        dataset: &T,
         bnodes: &mut HashMap<BlankNode, BlankNode>,
     ) -> Result<Option<OxQuad>, EvaluationError> {
         Ok(Some(OxQuad {
@@ -362,11 +362,11 @@ impl<'a, 'b: 'a> SimpleUpdateEvaluator<'a, 'b> {
         }))
     }
 
-    fn convert_term_or_var(
+    fn convert_term_or_var<T: StrLookup>(
         term: &TermPattern,
         variables: &[Variable],
         values: &EncodedTuple,
-        dataset: &DatasetView,
+        dataset: &T,
         bnodes: &mut HashMap<BlankNode, BlankNode>,
     ) -> Result<Option<Term>, EvaluationError> {
         Ok(match term {
@@ -383,11 +383,11 @@ impl<'a, 'b: 'a> SimpleUpdateEvaluator<'a, 'b> {
         })
     }
 
-    fn convert_named_node_or_var(
+    fn convert_named_node_or_var<T: StrLookup>(
         term: &NamedNodePattern,
         variables: &[Variable],
         values: &EncodedTuple,
-        dataset: &DatasetView,
+        dataset: &T,
     ) -> Result<Option<NamedNode>, EvaluationError> {
         Ok(match term {
             NamedNodePattern::NamedNode(term) => Some(term.clone()),
@@ -397,11 +397,11 @@ impl<'a, 'b: 'a> SimpleUpdateEvaluator<'a, 'b> {
         })
     }
 
-    fn convert_graph_name_or_var(
+    fn convert_graph_name_or_var<T: StrLookup>(
         term: &GraphNamePattern,
         variables: &[Variable],
         values: &EncodedTuple,
-        dataset: &DatasetView,
+        dataset: &T,
     ) -> Result<Option<OxGraphName>, EvaluationError> {
         match term {
             GraphNamePattern::NamedNode(term) => Ok(Some(term.clone().into())),
@@ -418,11 +418,11 @@ impl<'a, 'b: 'a> SimpleUpdateEvaluator<'a, 'b> {
         }
     }
 
-    fn convert_triple_pattern(
+    fn convert_triple_pattern<T: StrLookup>(
         triple: &TriplePattern,
         variables: &[Variable],
         values: &EncodedTuple,
-        dataset: &DatasetView,
+        dataset: &T,
         bnodes: &mut HashMap<BlankNode, BlankNode>,
     ) -> Result<Option<Triple>, EvaluationError> {
         Ok(Some(Triple {
@@ -455,11 +455,11 @@ impl<'a, 'b: 'a> SimpleUpdateEvaluator<'a, 'b> {
         }))
     }
 
-    fn convert_ground_quad_pattern(
+    fn convert_ground_quad_pattern<T: StrLookup>(
         quad: &GroundQuadPattern,
         variables: &[Variable],
         values: &EncodedTuple,
-        dataset: &DatasetView,
+        dataset: &T,
     ) -> Result<Option<OxQuad>, EvaluationError> {
         Ok(Some(OxQuad {
             subject: match Self::convert_ground_term_or_var(
@@ -497,11 +497,11 @@ impl<'a, 'b: 'a> SimpleUpdateEvaluator<'a, 'b> {
         }))
     }
 
-    fn convert_ground_term_or_var(
+    fn convert_ground_term_or_var<T: StrLookup>(
         term: &GroundTermPattern,
         variables: &[Variable],
         values: &EncodedTuple,
-        dataset: &DatasetView,
+        dataset: &T,
     ) -> Result<Option<Term>, EvaluationError> {
         Ok(match term {
             GroundTermPattern::NamedNode(term) => Some(term.clone().into()),
@@ -516,11 +516,11 @@ impl<'a, 'b: 'a> SimpleUpdateEvaluator<'a, 'b> {
         })
     }
 
-    fn convert_ground_triple_pattern(
+    fn convert_ground_triple_pattern<T: StrLookup>(
         triple: &GroundTriplePattern,
         variables: &[Variable],
         values: &EncodedTuple,
-        dataset: &DatasetView,
+        dataset: &T,
     ) -> Result<Option<Triple>, EvaluationError> {
         Ok(Some(Triple {
             subject: match Self::convert_ground_term_or_var(
