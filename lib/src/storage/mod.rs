@@ -322,6 +322,7 @@ impl Storage {
     }
 }
 
+#[derive(Clone)]
 pub struct StorageReader {
     reader: Reader,
     storage: Storage,

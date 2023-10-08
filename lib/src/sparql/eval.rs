@@ -38,8 +38,8 @@ type EncodedTuplesIterator = Box<dyn Iterator<Item = Result<EncodedTuple, Evalua
 type CustomFunctionRegistry = HashMap<NamedNode, Rc<dyn Fn(&[Term]) -> Option<Term>>>;
 
 #[derive(Clone)]
-pub struct SimpleEvaluator {
-    dataset: Rc<DatasetView>,
+pub struct SimpleEvaluator<T: DatasetView> {
+    dataset: Rc<T>,
     base_iri: Option<Rc<Iri<String>>>,
     now: DateTime,
     service_handler: Rc<dyn ServiceHandler<Error = EvaluationError>>,
@@ -47,9 +47,9 @@ pub struct SimpleEvaluator {
     run_stats: bool,
 }
 
-impl SimpleEvaluator {
+impl<T: DatasetView + 'static> SimpleEvaluator<T> {
     pub fn new(
-        dataset: Rc<DatasetView>,
+        dataset: Rc<T>,
         base_iri: Option<Rc<Iri<String>>>,
         service_handler: Rc<dyn ServiceHandler<Error = EvaluationError>>,
         custom_functions: Rc<CustomFunctionRegistry>,
@@ -630,7 +630,7 @@ impl SimpleEvaluator {
                             match comp {
                                 ComparatorFunction::Asc(expression) => {
                                     match cmp_terms(
-                                        &dataset,
+                                        &(*dataset),
                                         expression(a).as_ref(),
                                         expression(b).as_ref(),
                                     ) {
@@ -641,7 +641,7 @@ impl SimpleEvaluator {
                                 }
                                 ComparatorFunction::Desc(expression) => {
                                     match cmp_terms(
-                                        &dataset,
+                                        &(*dataset),
                                         expression(a).as_ref(),
                                         expression(b).as_ref(),
                                     ) {
@@ -873,7 +873,7 @@ impl SimpleEvaluator {
 
     #[allow(clippy::redundant_closure)] // False positive in 1.60
     fn accumulator_builder(
-        dataset: &Rc<DatasetView>,
+        dataset: &Rc<T>,
         function: &PlanAggregationFunction,
         distinct: bool,
     ) -> Box<dyn Fn() -> Box<dyn Accumulator>> {
@@ -1006,7 +1006,7 @@ impl SimpleEvaluator {
                 let dataset = Rc::clone(&self.dataset);
                 Rc::new(move |tuple| {
                     Some(
-                        (partial_cmp(&dataset, &a(tuple)?, &b(tuple)?)? == Ordering::Greater)
+                        (partial_cmp(&(*dataset), &a(tuple)?, &b(tuple)?)? == Ordering::Greater)
                             .into(),
                     )
                 })
@@ -1017,7 +1017,7 @@ impl SimpleEvaluator {
                 let dataset = Rc::clone(&self.dataset);
                 Rc::new(move |tuple| {
                     Some(
-                        match partial_cmp(&dataset, &a(tuple)?, &b(tuple)?)? {
+                        match partial_cmp(&(*dataset), &a(tuple)?, &b(tuple)?)? {
                             Ordering::Greater | Ordering::Equal => true,
                             Ordering::Less => false,
                         }
@@ -1030,7 +1030,10 @@ impl SimpleEvaluator {
                 let b = self.expression_evaluator(b, stat_children);
                 let dataset = Rc::clone(&self.dataset);
                 Rc::new(move |tuple| {
-                    Some((partial_cmp(&dataset, &a(tuple)?, &b(tuple)?)? == Ordering::Less).into())
+                    Some(
+                        (partial_cmp(&(*dataset), &a(tuple)?, &b(tuple)?)? == Ordering::Less)
+                            .into(),
+                    )
                 })
             }
             PlanExpression::LessOrEqual(a, b) => {
@@ -1039,7 +1042,7 @@ impl SimpleEvaluator {
                 let dataset = Rc::clone(&self.dataset);
                 Rc::new(move |tuple| {
                     Some(
-                        match partial_cmp(&dataset, &a(tuple)?, &b(tuple)?)? {
+                        match partial_cmp(&(*dataset), &a(tuple)?, &b(tuple)?)? {
                             Ordering::Less | Ordering::Equal => true,
                             Ordering::Greater => false,
                         }
@@ -1210,7 +1213,7 @@ impl SimpleEvaluator {
                 let dataset = Rc::clone(&self.dataset);
                 Rc::new(move |tuple| {
                     Some(build_string_literal_from_id(to_string_id(
-                        &dataset,
+                        &(*dataset),
                         &e(tuple)?,
                     )?))
                 })
@@ -1227,7 +1230,7 @@ impl SimpleEvaluator {
                     | EncodedTerm::BigBigLangStringLiteral { language_id, .. } => {
                         Some(build_string_literal_from_id(language_id.into()))
                     }
-                    e if e.is_literal() => Some(build_string_literal(&dataset, "")),
+                    e if e.is_literal() => Some(build_string_literal(&(*dataset), "")),
                     _ => None,
                 })
             }
@@ -1236,9 +1239,10 @@ impl SimpleEvaluator {
                 let language_range = self.expression_evaluator(language_range, stat_children);
                 let dataset = Rc::clone(&self.dataset);
                 Rc::new(move |tuple| {
-                    let mut language_tag = to_simple_string(&dataset, &language_tag(tuple)?)?;
+                    let mut language_tag = to_simple_string(&(*dataset), &language_tag(tuple)?)?;
                     language_tag.make_ascii_lowercase();
-                    let mut language_range = to_simple_string(&dataset, &language_range(tuple)?)?;
+                    let mut language_range =
+                        to_simple_string(&(*dataset), &language_range(tuple)?)?;
                     language_range.make_ascii_lowercase();
                     Some(
                         if &*language_range == "*" {
@@ -1260,7 +1264,7 @@ impl SimpleEvaluator {
             PlanExpression::Datatype(e) => {
                 let e = self.expression_evaluator(e, stat_children);
                 let dataset = Rc::clone(&self.dataset);
-                Rc::new(move |tuple| datatype(&dataset, &e(tuple)?))
+                Rc::new(move |tuple| datatype(&(*dataset), &e(tuple)?))
             }
             PlanExpression::Bound(v) => {
                 let v = v.encoded;
@@ -1275,9 +1279,9 @@ impl SimpleEvaluator {
                     if e.is_named_node() {
                         Some(e)
                     } else {
-                        let iri = to_simple_string(&dataset, &e)?;
+                        let iri = to_simple_string(&(*dataset), &e)?;
                         Some(build_named_node(
-                            &dataset,
+                            &(*dataset),
                             &if let Some(base_iri) = &base_iri {
                                 base_iri.resolve(&iri)
                             } else {
@@ -1296,7 +1300,7 @@ impl SimpleEvaluator {
                     Rc::new(move |tuple| {
                         Some(
                             dataset.encode_term(
-                                BlankNode::new(to_simple_string(&dataset, &id(tuple)?)?)
+                                BlankNode::new(to_simple_string(&(*dataset), &id(tuple)?)?)
                                     .ok()?
                                     .as_ref(),
                             ),
@@ -1360,7 +1364,7 @@ impl SimpleEvaluator {
                     let mut result = String::default();
                     let mut language = None;
                     for e in &l {
-                        let (value, e_language) = to_string_and_language(&dataset, &e(tuple)?)?;
+                        let (value, e_language) = to_string_and_language(&(*dataset), &e(tuple)?)?;
                         if let Some(lang) = language {
                             if lang != e_language {
                                 language = Some(None)
@@ -1371,7 +1375,7 @@ impl SimpleEvaluator {
                         result += &value
                     }
                     Some(build_plain_literal(
-                        &dataset,
+                        &(*dataset),
                         &result,
                         language.and_then(|v| v),
                     ))
@@ -1385,7 +1389,7 @@ impl SimpleEvaluator {
                     .map(|l| self.expression_evaluator(l, stat_children));
                 let dataset = Rc::clone(&self.dataset);
                 Rc::new(move |tuple| {
-                    let (source, language) = to_string_and_language(&dataset, &source(tuple)?)?;
+                    let (source, language) = to_string_and_language(&(*dataset), &source(tuple)?)?;
 
                     let starting_location: usize =
                         if let EncodedTerm::IntegerLiteral(v) = starting_loc(tuple)? {
@@ -1422,7 +1426,7 @@ impl SimpleEvaluator {
                     } else {
                         ""
                     };
-                    Some(build_plain_literal(&dataset, result, language))
+                    Some(build_plain_literal(&(*dataset), result, language))
                 })
             }
             PlanExpression::StrLen(arg) => {
@@ -1430,7 +1434,7 @@ impl SimpleEvaluator {
                 let dataset = Rc::clone(&self.dataset);
                 Rc::new(move |tuple| {
                     Some(
-                        i64::try_from(to_string(&dataset, &arg(tuple)?)?.chars().count())
+                        i64::try_from(to_string(&(*dataset), &arg(tuple)?)?.chars().count())
                             .ok()?
                             .into(),
                     )
@@ -1442,10 +1446,10 @@ impl SimpleEvaluator {
                 let replacement = self.expression_evaluator(replacement, stat_children);
                 let dataset = Rc::clone(&self.dataset);
                 Rc::new(move |tuple| {
-                    let (text, language) = to_string_and_language(&dataset, &arg(tuple)?)?;
-                    let replacement = to_simple_string(&dataset, &replacement(tuple)?)?;
+                    let (text, language) = to_string_and_language(&(*dataset), &arg(tuple)?)?;
+                    let replacement = to_simple_string(&(*dataset), &replacement(tuple)?)?;
                     Some(build_plain_literal(
-                        &dataset,
+                        &(*dataset),
                         &regex.replace_all(&text, replacement.as_str()),
                         language,
                     ))
@@ -1460,17 +1464,17 @@ impl SimpleEvaluator {
                     .map(|flags| self.expression_evaluator(flags, stat_children));
                 let dataset = Rc::clone(&self.dataset);
                 Rc::new(move |tuple| {
-                    let pattern = to_simple_string(&dataset, &pattern(tuple)?)?;
+                    let pattern = to_simple_string(&(*dataset), &pattern(tuple)?)?;
                     let options = if let Some(flags) = &flags {
-                        Some(to_simple_string(&dataset, &flags(tuple)?)?)
+                        Some(to_simple_string(&(*dataset), &flags(tuple)?)?)
                     } else {
                         None
                     };
                     let regex = compile_pattern(&pattern, options.as_deref())?;
-                    let (text, language) = to_string_and_language(&dataset, &arg(tuple)?)?;
-                    let replacement = to_simple_string(&dataset, &replacement(tuple)?)?;
+                    let (text, language) = to_string_and_language(&(*dataset), &arg(tuple)?)?;
+                    let replacement = to_simple_string(&(*dataset), &replacement(tuple)?)?;
                     Some(build_plain_literal(
-                        &dataset,
+                        &(*dataset),
                         &regex.replace_all(&text, replacement.as_str()),
                         language,
                     ))
@@ -1480,9 +1484,9 @@ impl SimpleEvaluator {
                 let e = self.expression_evaluator(e, stat_children);
                 let dataset = Rc::clone(&self.dataset);
                 Rc::new(move |tuple| {
-                    let (value, language) = to_string_and_language(&dataset, &e(tuple)?)?;
+                    let (value, language) = to_string_and_language(&(*dataset), &e(tuple)?)?;
                     Some(build_plain_literal(
-                        &dataset,
+                        &(*dataset),
                         &value.to_uppercase(),
                         language,
                     ))
@@ -1492,9 +1496,9 @@ impl SimpleEvaluator {
                 let e = self.expression_evaluator(e, stat_children);
                 let dataset = Rc::clone(&self.dataset);
                 Rc::new(move |tuple| {
-                    let (value, language) = to_string_and_language(&dataset, &e(tuple)?)?;
+                    let (value, language) = to_string_and_language(&(*dataset), &e(tuple)?)?;
                     Some(build_plain_literal(
-                        &dataset,
+                        &(*dataset),
                         &value.to_lowercase(),
                         language,
                     ))
@@ -1506,7 +1510,7 @@ impl SimpleEvaluator {
                 let dataset = Rc::clone(&self.dataset);
                 Rc::new(move |tuple| {
                     let (arg1, arg2, _) =
-                        to_argument_compatible_strings(&dataset, &arg1(tuple)?, &arg2(tuple)?)?;
+                        to_argument_compatible_strings(&(*dataset), &arg1(tuple)?, &arg2(tuple)?)?;
                     Some(arg1.starts_with(arg2.as_str()).into())
                 })
             }
@@ -1514,7 +1518,7 @@ impl SimpleEvaluator {
                 let ltrl = self.expression_evaluator(ltrl, stat_children);
                 let dataset = Rc::clone(&self.dataset);
                 Rc::new(move |tuple| {
-                    let ltlr = to_string(&dataset, &ltrl(tuple)?)?;
+                    let ltlr = to_string(&(*dataset), &ltrl(tuple)?)?;
                     let mut result = Vec::with_capacity(ltlr.len());
                     for c in ltlr.bytes() {
                         match c {
@@ -1539,7 +1543,7 @@ impl SimpleEvaluator {
                         }
                     }
                     Some(build_string_literal(
-                        &dataset,
+                        &(*dataset),
                         str::from_utf8(&result).ok()?,
                     ))
                 })
@@ -1550,7 +1554,7 @@ impl SimpleEvaluator {
                 let dataset = Rc::clone(&self.dataset);
                 Rc::new(move |tuple| {
                     let (arg1, arg2, _) =
-                        to_argument_compatible_strings(&dataset, &arg1(tuple)?, &arg2(tuple)?)?;
+                        to_argument_compatible_strings(&(*dataset), &arg1(tuple)?, &arg2(tuple)?)?;
                     Some(arg1.ends_with(arg2.as_str()).into())
                 })
             }
@@ -1560,7 +1564,7 @@ impl SimpleEvaluator {
                 let dataset = Rc::clone(&self.dataset);
                 Rc::new(move |tuple| {
                     let (arg1, arg2, _) =
-                        to_argument_compatible_strings(&dataset, &arg1(tuple)?, &arg2(tuple)?)?;
+                        to_argument_compatible_strings(&(*dataset), &arg1(tuple)?, &arg2(tuple)?)?;
                     Some(arg1.contains(arg2.as_str()).into())
                 })
             }
@@ -1570,11 +1574,11 @@ impl SimpleEvaluator {
                 let dataset = Rc::clone(&self.dataset);
                 Rc::new(move |tuple| {
                     let (arg1, arg2, language) =
-                        to_argument_compatible_strings(&dataset, &arg1(tuple)?, &arg2(tuple)?)?;
+                        to_argument_compatible_strings(&(*dataset), &arg1(tuple)?, &arg2(tuple)?)?;
                     Some(if let Some(position) = arg1.find(arg2.as_str()) {
-                        build_plain_literal(&dataset, &arg1[..position], language)
+                        build_plain_literal(&(*dataset), &arg1[..position], language)
                     } else {
-                        build_string_literal(&dataset, "")
+                        build_string_literal(&(*dataset), "")
                     })
                 })
             }
@@ -1584,11 +1588,11 @@ impl SimpleEvaluator {
                 let dataset = Rc::clone(&self.dataset);
                 Rc::new(move |tuple| {
                     let (arg1, arg2, language) =
-                        to_argument_compatible_strings(&dataset, &arg1(tuple)?, &arg2(tuple)?)?;
+                        to_argument_compatible_strings(&(*dataset), &arg1(tuple)?, &arg2(tuple)?)?;
                     Some(if let Some(position) = arg1.find(arg2.as_str()) {
-                        build_plain_literal(&dataset, &arg1[position + arg2.len()..], language)
+                        build_plain_literal(&(*dataset), &arg1[position + arg2.len()..], language)
                     } else {
-                        build_string_literal(&dataset, "")
+                        build_string_literal(&(*dataset), "")
                     })
                 })
             }
@@ -1683,9 +1687,9 @@ impl SimpleEvaluator {
                     };
                     Some(match timezone_offset {
                         Some(timezone_offset) => {
-                            build_string_literal(&dataset, &timezone_offset.to_string())
+                            build_string_literal(&(*dataset), &timezone_offset.to_string())
                         }
-                        None => build_string_literal(&dataset, ""),
+                        None => build_string_literal(&(*dataset), ""),
                     })
                 })
             }
@@ -1731,7 +1735,7 @@ impl SimpleEvaluator {
                     let mut buffer = String::with_capacity(44);
                     buffer.push_str("urn:uuid:");
                     generate_uuid(&mut buffer);
-                    Some(build_named_node(&dataset, &buffer))
+                    Some(build_named_node(&(*dataset), &buffer))
                 })
             }
             PlanExpression::StrUuid => {
@@ -1739,7 +1743,7 @@ impl SimpleEvaluator {
                 Rc::new(move |_| {
                     let mut buffer = String::with_capacity(36);
                     generate_uuid(&mut buffer);
-                    Some(build_string_literal(&dataset, &buffer))
+                    Some(build_string_literal(&(*dataset), &buffer))
                 })
             }
             PlanExpression::Md5(arg) => self.hash::<Md5>(arg, stat_children),
@@ -1780,7 +1784,7 @@ impl SimpleEvaluator {
                 Rc::new(move |tuple| {
                     Some(build_lang_string_literal_from_id(
                         to_simple_string_id(&lexical_form(tuple)?)?,
-                        build_language_id(&dataset, &lang_tag(tuple)?)?,
+                        build_language_id(&(*dataset), &lang_tag(tuple)?)?,
                     ))
                 })
             }
@@ -1789,7 +1793,7 @@ impl SimpleEvaluator {
                 let datatype = self.expression_evaluator(datatype, stat_children);
                 let dataset = Rc::clone(&self.dataset);
                 Rc::new(move |tuple| {
-                    let value = to_simple_string(&dataset, &lexical_form(tuple)?)?;
+                    let value = to_simple_string(&(*dataset), &lexical_form(tuple)?)?;
                     let datatype = if let EncodedTerm::NamedNode { iri_id } = datatype(tuple)? {
                         dataset.get_str(&iri_id).ok()?
                     } else {
@@ -1838,7 +1842,7 @@ impl SimpleEvaluator {
                 let dataset = Rc::clone(&self.dataset);
                 let regex = regex.clone();
                 Rc::new(move |tuple| {
-                    let text = to_string(&dataset, &text(tuple)?)?;
+                    let text = to_string(&(*dataset), &text(tuple)?)?;
                     Some(regex.is_match(&text).into())
                 })
             }
@@ -1850,14 +1854,14 @@ impl SimpleEvaluator {
                     .map(|flags| self.expression_evaluator(flags, stat_children));
                 let dataset = Rc::clone(&self.dataset);
                 Rc::new(move |tuple| {
-                    let pattern = to_simple_string(&dataset, &pattern(tuple)?)?;
+                    let pattern = to_simple_string(&(*dataset), &pattern(tuple)?)?;
                     let options = if let Some(flags) = &flags {
-                        Some(to_simple_string(&dataset, &flags(tuple)?)?)
+                        Some(to_simple_string(&(*dataset), &flags(tuple)?)?)
                     } else {
                         None
                     };
                     let regex = compile_pattern(&pattern, options.as_deref())?;
-                    let text = to_string(&dataset, &text(tuple)?)?;
+                    let text = to_string(&(*dataset), &text(tuple)?)?;
                     Some(regex.is_match(&text).into())
                 })
             }
@@ -2110,9 +2114,9 @@ impl SimpleEvaluator {
         let arg = self.expression_evaluator(arg, stat_children);
         let dataset = Rc::clone(&self.dataset);
         Rc::new(move |tuple| {
-            let input = to_simple_string(&dataset, &arg(tuple)?)?;
+            let input = to_simple_string(&(*dataset), &arg(tuple)?)?;
             let hash = hex::encode(H::new().chain_update(input.as_str()).finalize());
-            Some(build_string_literal(&dataset, &hash))
+            Some(build_string_literal(&(*dataset), &hash))
         })
     }
 }
@@ -2132,7 +2136,7 @@ fn to_bool(term: &EncodedTerm) -> Option<bool> {
     }
 }
 
-fn to_string_id(dataset: &DatasetView, term: &EncodedTerm) -> Option<SmallStringOrId> {
+fn to_string_id<T: DatasetView>(dataset: &T, term: &EncodedTerm) -> Option<SmallStringOrId> {
     match term {
         EncodedTerm::NamedNode { iri_id } => Some((*iri_id).into()),
         EncodedTerm::DefaultGraph
@@ -2174,7 +2178,7 @@ fn to_string_id(dataset: &DatasetView, term: &EncodedTerm) -> Option<SmallString
     }
 }
 
-fn to_simple_string(dataset: &DatasetView, term: &EncodedTerm) -> Option<String> {
+fn to_simple_string<T: StrLookup>(dataset: &T, term: &EncodedTerm) -> Option<String> {
     match term {
         EncodedTerm::SmallStringLiteral(value) => Some((*value).into()),
         EncodedTerm::BigStringLiteral { value_id } => dataset.get_str(value_id).ok()?,
@@ -2190,7 +2194,7 @@ fn to_simple_string_id(term: &EncodedTerm) -> Option<SmallStringOrId> {
     }
 }
 
-fn to_string(dataset: &DatasetView, term: &EncodedTerm) -> Option<String> {
+fn to_string<T: StrLookup>(dataset: &T, term: &EncodedTerm) -> Option<String> {
     match term {
         EncodedTerm::SmallStringLiteral(value)
         | EncodedTerm::SmallSmallLangStringLiteral { value, .. }
@@ -2204,8 +2208,8 @@ fn to_string(dataset: &DatasetView, term: &EncodedTerm) -> Option<String> {
     }
 }
 
-fn to_string_and_language(
-    dataset: &DatasetView,
+fn to_string_and_language<T: StrLookup>(
+    dataset: &T,
     term: &EncodedTerm,
 ) -> Option<(String, Option<SmallStringOrId>)> {
     match term {
@@ -2233,15 +2237,15 @@ fn to_string_and_language(
     }
 }
 
-fn build_named_node(dataset: &DatasetView, iri: &str) -> EncodedTerm {
+fn build_named_node<T: DatasetView>(dataset: &T, iri: &str) -> EncodedTerm {
     dataset.encode_term(NamedNodeRef::new_unchecked(iri))
 }
 
-fn encode_named_node(dataset: &DatasetView, node: NamedNodeRef<'_>) -> EncodedTerm {
+fn encode_named_node<T: DatasetView>(dataset: &T, node: NamedNodeRef<'_>) -> EncodedTerm {
     dataset.encode_term(node)
 }
 
-fn build_string_literal(dataset: &DatasetView, value: &str) -> EncodedTerm {
+fn build_string_literal<T: DatasetView>(dataset: &T, value: &str) -> EncodedTerm {
     build_string_literal_from_id(build_string_id(dataset, value))
 }
 
@@ -2252,8 +2256,8 @@ fn build_string_literal_from_id(id: SmallStringOrId) -> EncodedTerm {
     }
 }
 
-fn build_lang_string_literal(
-    dataset: &DatasetView,
+fn build_lang_string_literal<T: DatasetView>(
+    dataset: &T,
     value: &str,
     language_id: SmallStringOrId,
 ) -> EncodedTerm {
@@ -2283,8 +2287,8 @@ fn build_lang_string_literal_from_id(
     }
 }
 
-fn build_plain_literal(
-    dataset: &DatasetView,
+fn build_plain_literal<T: DatasetView>(
+    dataset: &T,
     value: &str,
     language: Option<SmallStringOrId>,
 ) -> EncodedTerm {
@@ -2295,7 +2299,7 @@ fn build_plain_literal(
     }
 }
 
-fn build_string_id(dataset: &DatasetView, value: &str) -> SmallStringOrId {
+fn build_string_id<T: DatasetView>(dataset: &T, value: &str) -> SmallStringOrId {
     if let Ok(value) = SmallString::try_from(value) {
         value.into()
     } else {
@@ -2305,7 +2309,7 @@ fn build_string_id(dataset: &DatasetView, value: &str) -> SmallStringOrId {
     }
 }
 
-fn build_language_id(dataset: &DatasetView, value: &EncodedTerm) -> Option<SmallStringOrId> {
+fn build_language_id<T: DatasetView>(dataset: &T, value: &EncodedTerm) -> Option<SmallStringOrId> {
     let mut language = to_simple_string(dataset, value)?;
     language.make_ascii_lowercase();
     Some(build_string_id(
@@ -2314,8 +2318,8 @@ fn build_language_id(dataset: &DatasetView, value: &EncodedTerm) -> Option<Small
     ))
 }
 
-fn to_argument_compatible_strings(
-    dataset: &DatasetView,
+fn to_argument_compatible_strings<T: StrLookup>(
+    dataset: &T,
     arg1: &EncodedTerm,
     arg2: &EncodedTerm,
 ) -> Option<(String, String, Option<SmallStringOrId>)> {
@@ -2350,8 +2354,8 @@ pub(super) fn compile_pattern(pattern: &str, flags: Option<&str>) -> Option<Rege
 }
 
 #[allow(clippy::rc_buffer)]
-fn decode_bindings(
-    dataset: Rc<DatasetView>,
+fn decode_bindings<T: Decoder + StrLookup + 'static>(
+    dataset: Rc<T>,
     iter: EncodedTuplesIterator,
     variables: Rc<Vec<Variable>>,
 ) -> QuerySolutionIter {
@@ -2371,8 +2375,8 @@ fn decode_bindings(
 }
 
 // this is used to encode results from a BindingIterator into an EncodedTuplesIterator. This happens when SERVICE clauses are evaluated
-fn encode_bindings(
-    dataset: Rc<DatasetView>,
+fn encode_bindings<T: DatasetView + 'static>(
+    dataset: Rc<T>,
     variables: Rc<[Variable]>,
     iter: QuerySolutionIter,
 ) -> EncodedTuplesIterator {
@@ -2549,7 +2553,11 @@ fn equals(a: &EncodedTerm, b: &EncodedTerm) -> Option<bool> {
     }
 }
 
-fn cmp_terms(dataset: &DatasetView, a: Option<&EncodedTerm>, b: Option<&EncodedTerm>) -> Ordering {
+fn cmp_terms<T: DatasetView>(
+    dataset: &T,
+    a: Option<&EncodedTerm>,
+    b: Option<&EncodedTerm>,
+) -> Ordering {
     match (a, b) {
         (Some(a), Some(b)) => match a {
             EncodedTerm::SmallBlankNode(a) => match b {
@@ -2637,7 +2645,7 @@ fn cmp_terms(dataset: &DatasetView, a: Option<&EncodedTerm>, b: Option<&EncodedT
     }
 }
 
-fn partial_cmp(dataset: &DatasetView, a: &EncodedTerm, b: &EncodedTerm) -> Option<Ordering> {
+fn partial_cmp<T: DatasetView>(dataset: &T, a: &EncodedTerm, b: &EncodedTerm) -> Option<Ordering> {
     if a == b {
         Some(Ordering::Equal)
     } else if let EncodedTerm::Triple(a) = a {
@@ -2657,8 +2665,8 @@ fn partial_cmp(dataset: &DatasetView, a: &EncodedTerm, b: &EncodedTerm) -> Optio
     }
 }
 
-fn partial_cmp_literals(
-    dataset: &DatasetView,
+fn partial_cmp_literals<T: DatasetView>(
+    dataset: &T,
     a: &EncodedTerm,
     b: &EncodedTerm,
 ) -> Option<Ordering> {
@@ -2835,19 +2843,19 @@ fn partial_cmp_literals(
     }
 }
 
-fn compare_str_ids(dataset: &DatasetView, a: &StrHash, b: &StrHash) -> Option<Ordering> {
+fn compare_str_ids<T: DatasetView>(dataset: &T, a: &StrHash, b: &StrHash) -> Option<Ordering> {
     Some(dataset.get_str(a).ok()??.cmp(&dataset.get_str(b).ok()??))
 }
 
-fn compare_str_id_str(dataset: &DatasetView, a: &StrHash, b: &str) -> Option<Ordering> {
+fn compare_str_id_str<T: DatasetView>(dataset: &T, a: &StrHash, b: &str) -> Option<Ordering> {
     Some(dataset.get_str(a).ok()??.as_str().cmp(b))
 }
 
-fn compare_str_str_id(dataset: &DatasetView, a: &str, b: &StrHash) -> Option<Ordering> {
+fn compare_str_str_id<T: DatasetView>(dataset: &T, a: &str, b: &StrHash) -> Option<Ordering> {
     Some(a.cmp(dataset.get_str(b).ok()??.as_str()))
 }
 
-fn datatype(dataset: &DatasetView, value: &EncodedTerm) -> Option<EncodedTerm> {
+fn datatype<T: DatasetView>(dataset: &T, value: &EncodedTerm) -> Option<EncodedTerm> {
     //TODO: optimize?
     match value {
         EncodedTerm::NamedNode { .. }
@@ -3129,11 +3137,11 @@ pub fn are_compatible_and_not_disjointed(a: &EncodedTuple, b: &EncodedTuple) -> 
 }
 
 #[derive(Clone)]
-struct PathEvaluator {
-    dataset: Rc<DatasetView>,
+struct PathEvaluator<DSVT: DatasetView> {
+    dataset: Rc<DSVT>,
 }
 
-impl PathEvaluator {
+impl<DSVT: DatasetView + 'static> PathEvaluator<DSVT> {
     fn eval_closed_in_graph(
         &self,
         path: &PlanPropertyPath,
@@ -4148,15 +4156,15 @@ impl Iterator for ConsecutiveDeduplication {
     }
 }
 
-struct ConstructIterator {
-    eval: SimpleEvaluator,
+struct ConstructIterator<T: DatasetView + Clone> {
+    eval: SimpleEvaluator<T>,
     iter: EncodedTuplesIterator,
     template: Vec<TripleTemplate>,
     buffered_results: Vec<Result<Triple, EvaluationError>>,
     bnodes: Vec<EncodedTerm>,
 }
 
-impl Iterator for ConstructIterator {
+impl<T: DatasetView + Clone> Iterator for ConstructIterator<T> {
     type Item = Result<Triple, EvaluationError>;
 
     fn next(&mut self) -> Option<Result<Triple, EvaluationError>> {
@@ -4226,7 +4234,7 @@ fn new_bnode() -> EncodedTerm {
     EncodedTerm::NumericalBlankNode { id: random() }
 }
 
-fn decode_triple<D: Decoder>(
+fn decode_triple<D: Decoder + ?Sized>(
     decoder: &D,
     subject: &EncodedTerm,
     predicate: &EncodedTerm,
@@ -4239,13 +4247,13 @@ fn decode_triple<D: Decoder>(
     ))
 }
 
-struct DescribeIterator {
-    eval: SimpleEvaluator,
+struct DescribeIterator<T: DatasetView> {
+    eval: SimpleEvaluator<T>,
     iter: EncodedTuplesIterator,
     quads: Box<dyn Iterator<Item = Result<EncodedQuad, EvaluationError>>>,
 }
 
-impl Iterator for DescribeIterator {
+impl<T: DatasetView + 'static> Iterator for DescribeIterator<T> {
     type Item = Result<Triple, EvaluationError>;
 
     fn next(&mut self) -> Option<Result<Triple, EvaluationError>> {
@@ -4564,21 +4572,21 @@ impl Accumulator for AvgAccumulator {
 }
 
 #[allow(clippy::option_option)]
-struct MinAccumulator {
-    dataset: Rc<DatasetView>,
+struct MinAccumulator<T: DatasetView> {
+    dataset: Rc<T>,
     min: Option<Option<EncodedTerm>>,
 }
 
-impl MinAccumulator {
-    fn new(dataset: Rc<DatasetView>) -> Self {
+impl<T: DatasetView> MinAccumulator<T> {
+    fn new(dataset: Rc<T>) -> Self {
         Self { dataset, min: None }
     }
 }
 
-impl Accumulator for MinAccumulator {
+impl<T: DatasetView> Accumulator for MinAccumulator<T> {
     fn add(&mut self, element: Option<EncodedTerm>) {
         if let Some(min) = &self.min {
-            if cmp_terms(&self.dataset, element.as_ref(), min.as_ref()) == Ordering::Less {
+            if cmp_terms(&(*self.dataset), element.as_ref(), min.as_ref()) == Ordering::Less {
                 self.min = Some(element)
             }
         } else {
@@ -4592,21 +4600,21 @@ impl Accumulator for MinAccumulator {
 }
 
 #[allow(clippy::option_option)]
-struct MaxAccumulator {
-    dataset: Rc<DatasetView>,
+struct MaxAccumulator<T: DatasetView> {
+    dataset: Rc<T>,
     max: Option<Option<EncodedTerm>>,
 }
 
-impl MaxAccumulator {
-    fn new(dataset: Rc<DatasetView>) -> Self {
+impl<T: DatasetView> MaxAccumulator<T> {
+    fn new(dataset: Rc<T>) -> Self {
         Self { dataset, max: None }
     }
 }
 
-impl Accumulator for MaxAccumulator {
+impl<T: DatasetView> Accumulator for MaxAccumulator<T> {
     fn add(&mut self, element: Option<EncodedTerm>) {
         if let Some(max) = &self.max {
-            if cmp_terms(&self.dataset, element.as_ref(), max.as_ref()) == Ordering::Greater {
+            if cmp_terms(&(*self.dataset), element.as_ref(), max.as_ref()) == Ordering::Greater {
                 self.max = Some(element)
             }
         } else {
@@ -4637,15 +4645,15 @@ impl Accumulator for SampleAccumulator {
 }
 
 #[allow(clippy::option_option)]
-struct GroupConcatAccumulator {
-    dataset: Rc<DatasetView>,
+struct GroupConcatAccumulator<T: DatasetView> {
+    dataset: Rc<T>,
     concat: Option<String>,
     language: Option<Option<SmallStringOrId>>,
     separator: Rc<str>,
 }
 
-impl GroupConcatAccumulator {
-    fn new(dataset: Rc<DatasetView>, separator: Rc<str>) -> Self {
+impl<T: DatasetView> GroupConcatAccumulator<T> {
+    fn new(dataset: Rc<T>, separator: Rc<str>) -> Self {
         Self {
             dataset,
             concat: Some(String::new()),
@@ -4655,11 +4663,13 @@ impl GroupConcatAccumulator {
     }
 }
 
-impl Accumulator for GroupConcatAccumulator {
+impl<T: DatasetView> Accumulator for GroupConcatAccumulator<T> {
     fn add(&mut self, element: Option<EncodedTerm>) {
         if let Some(concat) = self.concat.as_mut() {
             if let Some(element) = element {
-                if let Some((value, e_language)) = to_string_and_language(&self.dataset, &element) {
+                if let Some((value, e_language)) =
+                    to_string_and_language(&(*self.dataset), &element)
+                {
                     if let Some(lang) = self.language {
                         if lang != e_language {
                             self.language = Some(None)
@@ -4675,9 +4685,9 @@ impl Accumulator for GroupConcatAccumulator {
     }
 
     fn state(&self) -> Option<EncodedTerm> {
-        self.concat
-            .as_ref()
-            .map(|result| build_plain_literal(&self.dataset, result, self.language.and_then(|v| v)))
+        self.concat.as_ref().map(|result| {
+            build_plain_literal(&(*self.dataset), result, self.language.and_then(|v| v))
+        })
     }
 }
 

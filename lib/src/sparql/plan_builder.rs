@@ -14,15 +14,15 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::mem::swap;
 use std::rc::Rc;
 
-pub struct PlanBuilder<'a> {
-    dataset: &'a DatasetView,
+pub struct PlanBuilder<'a, T: DatasetView> {
+    dataset: &'a T,
     custom_functions: &'a HashMap<NamedNode, Rc<dyn Fn(&[OxTerm]) -> Option<OxTerm>>>,
     with_optimizations: bool,
 }
 
-impl<'a> PlanBuilder<'a> {
+impl<'a, T: DatasetView + 'a> PlanBuilder<'a, T> {
     pub fn build(
-        dataset: &'a DatasetView,
+        dataset: &'a T,
         pattern: &GraphPattern,
         is_cardinality_meaningful: bool,
         custom_functions: &'a HashMap<NamedNode, Rc<dyn Fn(&[OxTerm]) -> Option<OxTerm>>>,
@@ -55,7 +55,7 @@ impl<'a> PlanBuilder<'a> {
     }
 
     pub fn build_graph_template(
-        dataset: &'a DatasetView,
+        dataset: &'a T,
         template: &[TriplePattern],
         mut variables: Vec<Variable>,
         custom_functions: &'a HashMap<NamedNode, Rc<dyn Fn(&[OxTerm]) -> Option<OxTerm>>>,
