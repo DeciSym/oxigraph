@@ -706,6 +706,16 @@ pub trait StrLookup {
     fn contains_str(&self, key: &StrHash) -> Result<bool, StorageError>;
 }
 
+impl<T: StrLookup> StrLookup for Rc<T> {
+    fn get_str(&self, key: &StrHash) -> Result<Option<String>, StorageError> {
+        return (**self).get_str(key);
+    }
+
+    fn contains_str(&self, key: &StrHash) -> Result<bool, StorageError> {
+        return (**self).contains_str(key);
+    }
+}
+
 pub fn insert_term<F: FnMut(&StrHash, &str) -> Result<(), StorageError>>(
     term: TermRef<'_>,
     encoded: &EncodedTerm,
