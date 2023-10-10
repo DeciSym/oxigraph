@@ -4589,7 +4589,7 @@ impl<T: DatasetView> MinAccumulator<T> {
 impl<T: DatasetView + StrLookup> Accumulator for MinAccumulator<T> {
     fn add(&mut self, element: Option<EncodedTerm>) {
         if let Some(min) = &self.min {
-            if cmp_terms(&(*self.dataset), element.as_ref(), min.as_ref()) == Ordering::Less {
+            if cmp_terms(&self.dataset, element.as_ref(), min.as_ref()) == Ordering::Less {
                 self.min = Some(element)
             }
         } else {
@@ -4617,7 +4617,7 @@ impl<T: DatasetView> MaxAccumulator<T> {
 impl<T: DatasetView + StrLookup> Accumulator for MaxAccumulator<T> {
     fn add(&mut self, element: Option<EncodedTerm>) {
         if let Some(max) = &self.max {
-            if cmp_terms(&(*self.dataset), element.as_ref(), max.as_ref()) == Ordering::Greater {
+            if cmp_terms(&self.dataset, element.as_ref(), max.as_ref()) == Ordering::Greater {
                 self.max = Some(element)
             }
         } else {
@@ -4670,9 +4670,7 @@ impl<T: DatasetView + StrLookup> Accumulator for GroupConcatAccumulator<T> {
     fn add(&mut self, element: Option<EncodedTerm>) {
         if let Some(concat) = self.concat.as_mut() {
             if let Some(element) = element {
-                if let Some((value, e_language)) =
-                    to_string_and_language(&(*self.dataset), &element)
-                {
+                if let Some((value, e_language)) = to_string_and_language(&self.dataset, &element) {
                     if let Some(lang) = self.language {
                         if lang != e_language {
                             self.language = Some(None)
@@ -4688,9 +4686,9 @@ impl<T: DatasetView + StrLookup> Accumulator for GroupConcatAccumulator<T> {
     }
 
     fn state(&self) -> Option<EncodedTerm> {
-        self.concat.as_ref().map(|result| {
-            build_plain_literal(&(*self.dataset), result, self.language.and_then(|v| v))
-        })
+        self.concat
+            .as_ref()
+            .map(|result| build_plain_literal(&self.dataset, result, self.language.and_then(|v| v)))
     }
 }
 
