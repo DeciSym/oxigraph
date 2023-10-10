@@ -1280,7 +1280,7 @@ impl<'a, T: DatasetView + 'a> PlanBuilder<'a, T> {
                 Self::add_left_join_problematic_variables(child, set);
             }
             PlanNode::Union { children } => {
-                for child in children.iter() {
+                for child in children {
                     Self::add_left_join_problematic_variables(child, set);
                 }
             }
