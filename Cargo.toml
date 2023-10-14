@@ -12,9 +12,11 @@ members = [
     "lib/spargebra",
     "lib/sparopt",
     "lib/sparql-smith",
+    "lib/hdt_driver",
     "oxrocksdb-sys",
     "python",
-    "testsuite"
+    "testsuite",
+
 ]
 resolver = "2"
 
