@@ -10,7 +10,8 @@ members = [
     "oxrocksdb-sys",
     "python",
     "server",
-    "testsuite"
+    "testsuite",
+    "hdt_driver",
 ]
 resolver = "2"
 

@@ -3,7 +3,7 @@
 //! Stores execute SPARQL. See [`Store`](crate::store::Store::query()) for an example.
 
 mod algebra;
-mod dataset;
+pub mod dataset;
 mod error;
 mod eval;
 mod http;
@@ -15,7 +15,7 @@ mod update;
 
 use crate::model::{NamedNode, Term};
 pub use crate::sparql::algebra::{Query, QueryDataset, Update};
-use crate::sparql::dataset::KVDatasetView;
+use crate::sparql::dataset::{HDTDatasetView, KVDatasetView};
 pub use crate::sparql::error::{EvaluationError, QueryError};
 use crate::sparql::eval::{SimpleEvaluator, Timer};
 pub use crate::sparql::model::{QueryResults, QuerySolution, QuerySolutionIter, QueryTripleIter};
@@ -33,6 +33,119 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 use std::{fmt, io};
+
+pub fn evaluate_hdt_query(
+    dataset: HDTDatasetView,
+    query: impl TryInto<Query, Error = impl Into<EvaluationError>>,
+    options: QueryOptions,
+    run_stats: bool,
+) -> Result<(Result<QueryResults, EvaluationError>, QueryExplanation), EvaluationError> {
+    let query = query.try_into().map_err(Into::into)?;
+    let start_planning = Timer::now();
+    let (results, plan_node_with_stats, planning_duration) = match query.inner {
+        spargebra::Query::Select {
+            pattern, base_iri, ..
+        } => {
+            let (plan, variables) = PlanBuilder::build(
+                &dataset,
+                &pattern,
+                true,
+                &options.custom_functions,
+                options.without_optimizations,
+            )?;
+            let planning_duration = start_planning.elapsed();
+            let (results, explanation) = SimpleEvaluator::new(
+                Rc::new(dataset),
+                base_iri.map(Rc::new),
+                options.service_handler(),
+                Rc::new(options.custom_functions),
+                run_stats,
+            )
+            .evaluate_select_plan(Rc::new(plan), Rc::new(variables));
+            (Ok(results), explanation, planning_duration)
+        }
+        spargebra::Query::Ask {
+            pattern, base_iri, ..
+        } => {
+            let (plan, _) = PlanBuilder::build(
+                &dataset,
+                &pattern,
+                false,
+                &options.custom_functions,
+                options.without_optimizations,
+            )?;
+            let planning_duration = start_planning.elapsed();
+            let (results, explanation) = SimpleEvaluator::new(
+                Rc::new(dataset),
+                base_iri.map(Rc::new),
+                options.service_handler(),
+                Rc::new(options.custom_functions),
+                run_stats,
+            )
+            .evaluate_ask_plan(Rc::new(plan));
+            (results, explanation, planning_duration)
+        }
+        spargebra::Query::Construct {
+            template,
+            pattern,
+            base_iri,
+            ..
+        } => {
+            let (plan, variables) = PlanBuilder::build(
+                &dataset,
+                &pattern,
+                false,
+                &options.custom_functions,
+                options.without_optimizations,
+            )?;
+            let construct = PlanBuilder::build_graph_template(
+                &dataset,
+                &template,
+                variables,
+                &options.custom_functions,
+                options.without_optimizations,
+            );
+            let planning_duration = start_planning.elapsed();
+            let (results, explanation) = SimpleEvaluator::new(
+                Rc::new(dataset),
+                base_iri.map(Rc::new),
+                options.service_handler(),
+                Rc::new(options.custom_functions),
+                run_stats,
+            )
+            .evaluate_construct_plan(Rc::new(plan), construct);
+            (Ok(results), explanation, planning_duration)
+        }
+        spargebra::Query::Describe {
+            pattern, base_iri, ..
+        } => {
+            let (plan, _) = PlanBuilder::build(
+                &dataset,
+                &pattern,
+                false,
+                &options.custom_functions,
+                options.without_optimizations,
+            )?;
+            let planning_duration = start_planning.elapsed();
+            let (results, explanation) = SimpleEvaluator::new(
+                Rc::new(dataset),
+                base_iri.map(Rc::new),
+                options.service_handler(),
+                Rc::new(options.custom_functions),
+                run_stats,
+            )
+            .evaluate_describe_plan(Rc::new(plan));
+            (Ok(results), explanation, planning_duration)
+        }
+    };
+    let explanation = QueryExplanation {
+        inner: plan_node_with_stats,
+        with_stats: run_stats,
+        parsing_duration: query.parsing_duration,
+        planning_duration,
+    };
+    Ok((results, explanation))
+}
 
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn evaluate_query(
