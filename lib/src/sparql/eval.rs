@@ -2132,7 +2132,7 @@ fn to_bool(term: &EncodedTerm) -> Option<bool> {
     }
 }
 
-fn to_string_id<T: DatasetView>(dataset: &T, term: &EncodedTerm) -> Option<SmallStringOrId> {
+fn to_string_id<T: DatasetView + StrLookup>(dataset: &T, term: &EncodedTerm) -> Option<SmallStringOrId> {
     match term {
         EncodedTerm::NamedNode { iri_id } => Some(
             if let Ok(value) = SmallString::try_from(dataset.get_str(iri_id).ok()??.as_str()) {
