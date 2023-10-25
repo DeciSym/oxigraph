@@ -1,17 +1,18 @@
 [workspace]
 members = [
+    "hdt_driver",
     "js",
     "lib",
     "lib/oxrdf",
     "lib/oxsdatatypes",
-    "lib/spargebra",
     "lib/sparesults",
+    "lib/spargebra",
     "lib/sparql-smith",
+    "oxhdt-sys",
     "oxrocksdb-sys",
     "python",
     "server",
     "testsuite",
-    "hdt_driver",
 ]
 resolver = "2"
 

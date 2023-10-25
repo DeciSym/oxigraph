@@ -1013,6 +1013,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4d5d9eb14b174ee9aa2ef96dc2b94637a2d4b6e7cb873c7e171f0c20c6cf3eac"
 
 [[package]]
+name = "oxhdt-sys"
+version = "0.1.0"
+dependencies = [
+ "oxigraph",
+]
+
+[[package]]
 name = "oxhttp"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
