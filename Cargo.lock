@@ -1010,6 +1010,7 @@ name = "oxhdt-sys"
 version = "0.1.0"
 dependencies = [
  "oxigraph",
+ "oxigraph_testsuite",
 ]
 
 [[package]]
