@@ -656,13 +656,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hdt_driver"
-version = "0.1.0"
-dependencies = [
- "oxigraph",
-]
-
-[[package]]
 name = "heck"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

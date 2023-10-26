@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    "hdt_driver",
     "js",
     "lib",
     "lib/oxrdf",
