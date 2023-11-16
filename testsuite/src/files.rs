@@ -18,6 +18,11 @@ pub fn read_file(url: &str) -> Result<impl BufRead> {
             "https://github.com/oxigraph/oxigraph/tests/",
             "oxigraph-tests/",
         )
+    } else if url.starts_with("https://github.com/oxigraph/oxhdt-sys/tests/") {
+        url.replace(
+            "https://github.com/oxigraph/oxhdt-sys/tests/",
+            "../oxhdt-sys/tests/",
+        )
     } else {
         bail!("Not supported url for file: {url}")
     });
