@@ -1,6 +1,6 @@
 [package]
 name = "oxigraph"
-version = "0.3.20"
+version = "0.3.22"
 authors = ["Tpt <thomas@pellissier-tanon.fr>"]
 license = "MIT OR Apache-2.0"
 readme = "README.md"
@@ -36,7 +36,7 @@ rio_api = "0.8"
 rio_turtle = "0.8"
 rio_xml = "0.8"
 hex = "0.4"
-siphasher = "0.3"
+siphasher = ">=0.3,<2.0"
 lazy_static = "1"
 json-event-parser = "0.1"
 oxrdf = { version = "0.1.7", path="oxrdf", features = ["rdf-star", "oxsdatatypes"] }
@@ -47,7 +47,7 @@ hdt = { version = "0.1.4", default-features = false }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 libc = "0.2"
-oxrocksdb-sys = { version = "0.3.20", path="../oxrocksdb-sys" }
+oxrocksdb-sys = { version = "0.3.22", path="../oxrocksdb-sys" }
 oxhttp = { version = "0.1", optional = true }
 
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
