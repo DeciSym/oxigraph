@@ -814,6 +814,9 @@ impl Db {
         &self,
         ssts_for_cf: &[(&ColumnFamily, PathBuf)],
     ) -> Result<(), StorageError> {
+        if ssts_for_cf.is_empty() {
+            return Ok(()); // Rocksdb does not support empty lists
+        }
         if let DbKind::ReadWrite(db) = &self.inner {
             let mut paths_by_cf = HashMap::<_, Vec<_>>::new();
             for (cf, path) in ssts_for_cf {
@@ -1395,6 +1398,7 @@ impl From<ErrorStatus> for StorageError {
 struct UnsafeEnv(*mut rocksdb_env_t);
 
 // Hack for lazy_static. OK because only written in lazy static and used in a thread-safe way by RocksDB
+unsafe impl Send for UnsafeEnv {}
 unsafe impl Sync for UnsafeEnv {}
 
 fn path_to_cstring(path: &Path) -> Result<CString, StorageError> {
