@@ -46,6 +46,10 @@ spargebra = { workspace = true, features = ["rdf-star", "sep-0002", "sep-0006"] 
 sparopt = { workspace = true, features = ["rdf-star", "sep-0002", "sep-0006"] }
 hdt = { version = "0.1.4", default-features = false }
 thiserror.workspace = true
+http = "1.1.0"
+serde = { version = "1.0.197", features = ["derive"] }
+reqwest = { version = "0.12.3", features = ["json", "blocking"] }
+serde_json = "1.0.116"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 libc.workspace = true

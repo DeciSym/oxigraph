@@ -1,7 +1,7 @@
 #![allow(clippy::panic)]
 
 use codspeed_criterion_compat::{criterion_group, criterion_main, Criterion, Throughput};
-use oxhttp::model::{Method, Request, Status};
+use oxhttp::model::{HeaderName, Method, Request, Status};
 use oxigraph::io::{RdfFormat, RdfParser};
 use oxigraph::sparql::{Query, QueryResults, Update};
 use oxigraph::store::Store;

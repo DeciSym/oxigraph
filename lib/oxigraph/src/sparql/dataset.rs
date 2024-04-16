@@ -6,6 +6,7 @@ use crate::storage::numeric_encoder::{
 };
 use crate::storage::{StorageError, StorageReader};
 use hdt::Hdt;
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -97,10 +98,90 @@ pub struct HDTDataset {
     hdt: Hdt,
 }
 
+#[derive(Debug, Clone)]
+pub struct RemoteDataset {
+    // host and port where these files are hosted
+    authority: http::uri::Authority,
+    // list of filepaths
+    files: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Bgp {
+    pub files: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub subject: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub predicate: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub object: Option<String>,
+}
+
+impl RemoteDataset {
+    fn remote_query(
+        &self,
+        s: Option<&str>,
+        p: Option<&str>,
+        o: Option<&str>,
+    ) -> Box<dyn Iterator<Item = (String, String, String)> + '_> {
+        let client = reqwest::blocking::Client::new();
+        let authority = self.authority.as_str();
+        let url = format!("http://{authority}/query");
+        let res = match client
+            .post(url)
+            .json(&Bgp {
+                files: self.files.clone(),
+                subject: s.map(|s| s.to_string()),
+                predicate: p.map(|s| s.to_string()),
+                object: o.map(|s| s.to_string()),
+            })
+            .send()
+        {
+            Ok(res) => res,
+            Err(e) => {
+                eprintln!(
+                    "oxigraph: error during the request for host {:?}: {e}",
+                    authority
+                );
+                return Box::new(empty());
+            }
+        };
+
+        let resp_body = match res.text() {
+            Ok(res) => res,
+            Err(e) => {
+                eprintln!(
+                    "oxigraph: error reading response body for host {:?}: {e}",
+                    authority
+                );
+                return Box::new(empty());
+            }
+        };
+        let res: Vec<(String, String, String)> = match serde_json::from_str(&resp_body) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("json error on the response: {e}");
+                return Box::new(empty());
+            }
+        };
+        println!(
+            "remote query for host {:?} completed successfully",
+            authority
+        );
+        return Box::new(res.into_iter());
+    }
+}
+
 /// Boundry over a Header-Dictionary-Triplies (HDT) storage layer.
 pub struct HDTDatasetView {
     // collection of HDT files in the dataset
     hdts: Vec<HDTDataset>,
+
+    // collection of server hosted files in the dataset
+    remotes: HashMap<String, RemoteDataset>,
 
     /// In-memory string hashs.
     extra: RefCell<HashMap<StrHash, String>>,
@@ -110,6 +191,7 @@ pub struct HDTDatasetView {
 impl Clone for HDTDatasetView {
     fn clone(&self) -> HDTDatasetView {
         let mut hdts: Vec<HDTDataset> = Vec::new();
+        let mut remotes = HashMap::new();
         for dataset in self.hdts.iter() {
             let file = std::fs::File::open(&dataset.path).expect("error opening file");
             let hdt = Hdt::new(std::io::BufReader::new(file)).expect("error loading HDT");
@@ -118,9 +200,13 @@ impl Clone for HDTDatasetView {
                 hdt,
             })
         }
+        for (k, v) in self.remotes.iter() {
+            remotes.insert(k.clone(), v.clone());
+        }
 
         Self {
             hdts,
+            remotes,
             extra: self.extra.clone(),
         }
     }
@@ -129,18 +215,48 @@ impl Clone for HDTDatasetView {
 impl HDTDatasetView {
     pub fn new(paths: Vec<String>) -> Self {
         let mut hdts: Vec<HDTDataset> = Vec::new();
+        let mut remotes: HashMap<String, RemoteDataset> = HashMap::new();
         for path in paths.iter() {
             // TODO catch error and proceed to next file?
-            let file = std::fs::File::open(path.as_str()).expect("error opening HDT file");
-            let hdt = Hdt::new(std::io::BufReader::new(file)).expect("error loading HDT");
-            hdts.push(HDTDataset {
-                path: path.to_string(),
-                hdt,
-            })
+            let uri = path.parse::<http::Uri>().unwrap();
+            if uri.scheme().is_none() {
+                let file = std::fs::File::open(path.as_str()).expect("error opening HDT file");
+                let hdt = Hdt::new(std::io::BufReader::new(file)).expect("error loading HDT");
+                hdts.push(HDTDataset {
+                    path: path.to_string(),
+                    hdt,
+                })
+            } else if uri.scheme_str().unwrap() == "de" {
+                let authority = uri.authority().unwrap().to_string();
+                let file = uri.path().to_string();
+                if remotes.contains_key(&authority) {
+                    let entry: &RemoteDataset = remotes.get(&authority).unwrap();
+                    let mut files = vec![file];
+                    files.extend(entry.files.clone());
+                    remotes.insert(
+                        authority,
+                        RemoteDataset {
+                            authority: uri.authority().unwrap().clone(),
+                            files,
+                        },
+                    );
+                } else {
+                    remotes.insert(
+                        authority,
+                        RemoteDataset {
+                            authority: uri.authority().unwrap().clone(),
+                            files: vec![file],
+                        },
+                    );
+                }
+            } else {
+                eprintln!("scheme \"{:?}\" is unsupported", uri.scheme_str().unwrap())
+            }
         }
 
         Self {
             hdts,
+            remotes,
             extra: RefCell::new(HashMap::default()),
         }
     }
@@ -257,6 +373,24 @@ impl DatasetView for HDTDatasetView {
                 .triples_with_pattern(s.as_deref(), p.as_deref(), o.as_deref());
 
             // For each result
+            for result in results {
+                // Create OxRDF terms for the HDT result.
+                let ex_s = self.auto_term(&(*result.0)).unwrap();
+                let ex_p = self.auto_term(&(*result.1)).unwrap();
+                let ex_o = self.auto_term(&(*result.2)).unwrap();
+
+                // Add the result to the vector.
+                v.push(Ok(EncodedQuad::new(
+                    ex_s,
+                    ex_p,
+                    ex_o,
+                    EncodedTerm::DefaultGraph,
+                )));
+            }
+        }
+
+        for (_, data) in self.remotes.iter() {
+            let results = data.remote_query(s.as_deref(), p.as_deref(), o.as_deref());
             for result in results {
                 // Create OxRDF terms for the HDT result.
                 let ex_s = self.auto_term(&(*result.0)).unwrap();
