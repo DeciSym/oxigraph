@@ -127,6 +127,7 @@ impl RemoteDataset {
         p: Option<&str>,
         o: Option<&str>,
     ) -> Box<dyn Iterator<Item = (String, String, String)> + '_> {
+        // TODO follow Gitter chat for update async support
         let client = reqwest::blocking::Client::new();
         let authority = self.authority.as_str();
         let url = format!("http://{authority}/query");
@@ -218,7 +219,16 @@ impl HDTDatasetView {
         let mut remotes: HashMap<String, RemoteDataset> = HashMap::new();
         for path in paths.iter() {
             // TODO catch error and proceed to next file?
-            let uri = path.parse::<http::Uri>().unwrap();
+            let res = path.parse::<http::Uri>();
+            let Ok(uri) = res else {
+                let file = std::fs::File::open(path.as_str()).expect("error opening HDT file");
+                let hdt = Hdt::new(std::io::BufReader::new(file)).expect("error loading HDT");
+                hdts.push(HDTDataset {
+                    path: path.to_string(),
+                    hdt,
+                });
+                continue;
+            };
             if uri.scheme().is_none() {
                 let file = std::fs::File::open(path.as_str()).expect("error opening HDT file");
                 let hdt = Hdt::new(std::io::BufReader::new(file)).expect("error loading HDT");
