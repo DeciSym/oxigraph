@@ -104,6 +104,8 @@ pub struct RemoteDataset {
     authority: http::uri::Authority,
     // list of filepaths
     files: Vec<String>,
+    // http client options for communicating with remote server
+    options: Option<RemoteClientOptions>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -120,6 +122,12 @@ pub struct Bgp {
     pub object: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RemoteClientOptions {
+    pub ca_cert: reqwest::Certificate,
+    pub client_pem: reqwest::Identity,
+}
+
 impl RemoteDataset {
     fn remote_query(
         &self,
@@ -128,9 +136,28 @@ impl RemoteDataset {
         o: Option<&str>,
     ) -> Box<dyn Iterator<Item = (String, String, String)> + '_> {
         // TODO follow Gitter chat for update async support
-        let client = reqwest::blocking::Client::new();
+        let client = if self.options.is_some() {
+            let opts = self.options.as_ref().unwrap().clone();
+            let builder = reqwest::blocking::Client::builder().use_rustls_tls();
+            builder
+                .tls_built_in_root_certs(false)
+                .add_root_certificate(opts.ca_cert)
+                .identity(opts.client_pem)
+                .https_only(true)
+                .min_tls_version(reqwest::tls::Version::TLS_1_3)
+                .danger_accept_invalid_certs(true)
+                .build()
+                .expect("invalid certs provided")
+        } else {
+            reqwest::blocking::Client::new()
+        };
+
         let authority = self.authority.as_str();
-        let url = format!("http://{authority}/query");
+        let url = if self.options.is_some() {
+            format!("https://{authority}/query")
+        } else {
+            format!("http://{authority}/query")
+        };
         let res = match client
             .post(url)
             .json(&Bgp {
@@ -214,7 +241,7 @@ impl Clone for HDTDatasetView {
 }
 
 impl HDTDatasetView {
-    pub fn new(paths: Vec<String>) -> Self {
+    pub fn new(paths: Vec<String>, options: &Option<RemoteClientOptions>) -> Self {
         let mut hdts: Vec<HDTDataset> = Vec::new();
         let mut remotes: HashMap<String, RemoteDataset> = HashMap::new();
         for path in paths.iter() {
@@ -248,6 +275,7 @@ impl HDTDatasetView {
                         RemoteDataset {
                             authority: uri.authority().unwrap().clone(),
                             files,
+                            options: options.clone(),
                         },
                     );
                 } else {
@@ -256,6 +284,7 @@ impl HDTDatasetView {
                         RemoteDataset {
                             authority: uri.authority().unwrap().clone(),
                             files: vec![file],
+                            options: options.clone(),
                         },
                     );
                 }
