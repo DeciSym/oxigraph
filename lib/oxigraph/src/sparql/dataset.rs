@@ -153,6 +153,7 @@ impl HDTDatasetView {
                 // It is not possible to get a string representation
                 // directly from an EncodedTerm, so it must first be
                 // decoded.
+                println!("encoded term: {:?}", i);
                 let decoded_term = &self.decode_term(i).unwrap();
                 let term = match decoded_term {
                     // Remove double quote delimiters from URIs.
@@ -172,6 +173,11 @@ impl HDTDatasetView {
                         else {
                             None
                         }
+                    }
+
+                    Term::BlankNode(s) => {
+                        println!("blank val: {:?}", s);
+                        Some(decoded_term.to_string())
                     }
 
                     // Otherwise use the string directly.
@@ -207,9 +213,19 @@ impl HDTDatasetView {
             },
 
             // Underscore prefix indicating an Blank Node.
-            Some('_') => Ok(EncodedTerm::from(BlankNodeRef::new_unchecked(*Arc::from(
-                &s[2..],
-            )))),
+            // unclear why the "_:" prefix needs to be dropped from s
+            Some('_') => {
+                println!("blank s: {:?}", s);
+                let term = oxrdf::BlankNode::new(&s[2..]).unwrap();
+                let val = self.encode_term(&term);
+                println!(
+                    "BlankNode term: {:?}\ts: {:?}\tencoded: {:?}",
+                    &term, s, val
+                );
+                Ok(EncodedTerm::from(BlankNodeRef::new_unchecked(*Arc::from(
+                    &s[2..],
+                ))))
+            }
 
             // Double-quote delimiters not present. Underscore prefix
             // not present. Assuming a URI.
@@ -241,12 +257,15 @@ impl DatasetView for HDTDatasetView {
                 _ => panic!("HDT does not support named graphs."),
             }
         }
-
+        println!(
+            "Subject: {:?}\tPredicate: {:?}\tObject: {:?}",
+            subject, predicate, object
+        );
         // Get string representations of the Oxigraph EncodedTerms.
         let s = self.encodedterm_to_hdt_bgp_str(subject);
         let p = self.encodedterm_to_hdt_bgp_str(predicate);
         let o = self.encodedterm_to_hdt_bgp_str(object);
-
+        println!("s: {:?}\tp: {:?}\tp: {:?}", s, p, o);
         // Create a vector to hold the results.
         let mut v: Vec<Result<EncodedQuad, EvaluationError>> = Vec::new();
 
