@@ -757,9 +757,9 @@ dependencies = [
 
 [[package]]
 name = "hdt"
-version = "0.1.8"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "595574230cb3f5561d29cee0293657d2831f360b66101b643980d866461c9415"
+checksum = "8994ae6ee2907a4836df99e60cfaac8a753414f55f96603dfaa166fd7a33096f"
 dependencies = [
  "bytesize",
  "crc",
@@ -770,7 +770,6 @@ dependencies = [
  "log",
  "mownstr",
  "ntriple",
- "rsdict",
  "sucds",
  "thiserror",
 ]
@@ -866,7 +865,7 @@ checksum = "0cfb4452af4310b464be640c873d17a1ae845709cdf2f024257deebabf1b84b4"
 dependencies = [
  "pct-str",
  "smallvec",
- "static-regular-grammar",
+ "static-regular-grammar 1.1.1",
  "thiserror",
 ]
 
@@ -944,9 +943,13 @@ dependencies = [
 
 [[package]]
 name = "langtag"
-version = "0.3.4"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed60c85f254d6ae8450cec15eedd921efbc4d1bdf6fcf6202b9a58b403f6f805"
+checksum = "9ecb4c689a30e48ebeaa14237f34037e300dd072e6ad21a9ec72e810ff3c6600"
+dependencies = [
+ "static-regular-grammar 2.0.1",
+ "thiserror",
+]
 
 [[package]]
 name = "lazy_static"
@@ -1758,12 +1761,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rsdict"
-version = "0.0.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7eb2dc34e79f4b6de17b275f21fd601ef842f12452cf937c2f86748924db636b"
-
-[[package]]
 name = "rustc-demangle"
 version = "0.1.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2026,6 +2023,26 @@ name = "static-regular-grammar"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6f74f34069d6f26a5d63fcbc3378a20798cf83572fb87a71b805bca7e6a790cc"
+dependencies = [
+ "abnf",
+ "btree-range-map",
+ "ciborium",
+ "hex_fmt",
+ "indoc",
+ "proc-macro-error",
+ "proc-macro2",
+ "quote 1.0.35",
+ "serde",
+ "sha2",
+ "syn 2.0.55",
+ "thiserror",
+]
+
+[[package]]
+name = "static-regular-grammar"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8522b7d6f87d9695617821d54a07c8c5a2420368435602dc634cff04784b93c2"
 dependencies = [
  "abnf",
  "btree-range-map",
