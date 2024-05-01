@@ -860,8 +860,7 @@ checksum = "290f1a1d9242c78d09ce40a5e87e7554ee637af1351968159f4952f028f75604"
 [[package]]
 name = "hdt"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8994ae6ee2907a4836df99e60cfaac8a753414f55f96603dfaa166fd7a33096f"
+source = "git+https://github.com/GregHanson/hdt/?branch=zero-zero-loop-fix#9e9c045cc4133674609eae457d01bb19ead85f25"
 dependencies = [
  "bytesize",
  "crc",
