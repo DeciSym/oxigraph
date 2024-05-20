@@ -267,12 +267,17 @@ impl IdStr {
 fn validate_blank_node_identifier(id: &str) -> Result<(), BlankNodeIdParseError> {
     let mut chars = id.chars();
     let front = chars.next().ok_or(BlankNodeIdParseError)?;
+    // TODO: blank node issue with label _:@ with java based rdt2hdt conversion
+    // upstream issue https://github.com/rdfhdt/hdt-java/issues/210
+    // List of acceptable char in label found here: https://www.w3.org/TR/turtle/#grammar-production-PN_CHARS_BASE
+    // temporarily adding 0040 for @ until consensus is reached
     match front {
         '0'..='9'
         | '_'
         | ':'
         | 'A'..='Z'
         | 'a'..='z'
+        | '\u{0040}'
         | '\u{00C0}'..='\u{00D6}'
         | '\u{00D8}'..='\u{00F6}'
         | '\u{00F8}'..='\u{02FF}'
