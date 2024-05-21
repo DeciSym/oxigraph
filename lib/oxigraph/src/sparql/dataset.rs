@@ -358,7 +358,33 @@ impl HDTDatasetView {
                 )),
 
                 Some(_) => {
-                    let term = Term::from_str(s);
+                    let mut term = Term::from_str(s);
+                    // accounts for bgp result is providing rdf synax but having already processed string escapes
+                    if term.is_err() {
+                        // apply first patch: re-add escape characters that may have been removed
+                        let mut val = s.to_string();
+                        val = val.replace(r#"\"#, r#"\\"#);
+
+                        term = Term::from_str(&val);
+                        if term.is_err() {
+                            // apply second patch: make sure '"' is escaped properly for strings
+                            let start = val.find(r#"""#).unwrap();
+                            let end = val.rfind(r#"""#).unwrap();
+                            let escaped_val = val[start + 1..end].replace(r#"""#, r#"\""#);
+                            let start_str = &val[0..start + 1];
+                            let end_str = &val[end..];
+                            let combined = format!("{}{escaped_val}{}", start_str, end_str);
+                            term = Term::from_str(&combined);
+                            if term.is_err() {
+                                let e = term.err().unwrap();
+
+                                return Err(Error::new(
+                                    ErrorKind::InvalidData,
+                                    format!("incorrectly formatted term provided {s}: {e}",),
+                                ));
+                            }
+                        }
+                    }
                     Ok(self.encode_term(&term.unwrap()))
                 }
             },
