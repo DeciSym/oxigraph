@@ -1458,6 +1458,7 @@ dependencies = [
  "js-sys",
  "json-event-parser",
  "libc",
+ "log",
  "md-5",
  "oxhttp",
  "oxilangtag",

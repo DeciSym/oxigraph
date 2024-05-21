@@ -6,6 +6,7 @@ use crate::storage::numeric_encoder::{
 };
 use crate::storage::{StorageError, StorageReader};
 use hdt::Hdt;
+use log::{debug, error};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
@@ -170,7 +171,7 @@ impl RemoteDataset {
         {
             Ok(res) => res,
             Err(e) => {
-                eprintln!(
+                error!(
                     "oxigraph: error during the request for host {:?}: {e}",
                     authority
                 );
@@ -181,7 +182,7 @@ impl RemoteDataset {
         let resp_body = match res.text() {
             Ok(res) => res,
             Err(e) => {
-                eprintln!(
+                error!(
                     "oxigraph: error reading response body for host {:?}: {e}",
                     authority
                 );
@@ -191,11 +192,11 @@ impl RemoteDataset {
         let res: Vec<(String, String, String)> = match serde_json::from_str(&resp_body) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("json error on the response: {e}");
+                error!("json error on the response: {e}");
                 return Box::new(empty());
             }
         };
-        println!(
+        debug!(
             "remote query for host {:?} completed successfully",
             authority
         );
@@ -289,7 +290,7 @@ impl HDTDatasetView {
                     );
                 }
             } else {
-                eprintln!("scheme \"{:?}\" is unsupported", uri.scheme_str().unwrap())
+                error!("scheme \"{:?}\" is unsupported", uri.scheme_str().unwrap())
             }
         }
 
