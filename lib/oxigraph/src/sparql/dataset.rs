@@ -269,7 +269,7 @@ impl HDTDatasetView {
                 let file = uri.path().to_string();
                 if remotes.contains_key(&authority) {
                     let entry: &RemoteDataset = remotes.get(&authority).unwrap();
-                    let mut files = vec![file];
+                    let mut files = vec![file.replacen("/", "", 1)];
                     files.extend(entry.files.clone());
                     remotes.insert(
                         authority,
@@ -284,7 +284,7 @@ impl HDTDatasetView {
                         authority,
                         RemoteDataset {
                             authority: uri.authority().unwrap().clone(),
-                            files: vec![file],
+                            files: vec![file.replacen("/", "", 1)],
                             options: options.clone(),
                         },
                     );
