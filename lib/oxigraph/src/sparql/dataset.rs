@@ -5,8 +5,10 @@ use crate::storage::numeric_encoder::{
     insert_term, Decoder, EncodedQuad, EncodedTerm, StrHash, StrLookup,
 };
 use crate::storage::{StorageError, StorageReader};
+use crossbeam_channel::{select, tick};
 use hdt::Hdt;
-use log::{debug, error};
+use http::StatusCode;
+use log::{debug, error, warn};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
@@ -15,8 +17,9 @@ use std::io::{Error, ErrorKind};
 use std::iter::empty;
 use std::rc::Rc;
 use std::str::FromStr;
-use std::sync::Arc;
-
+use std::sync::{mpsc, Arc};
+use std::thread;
+use std::time::Duration;
 /// Boundry between the query evaluator and the storage layer.
 pub trait DatasetView: Clone {
     fn encoded_quads_for_pattern(
@@ -103,7 +106,7 @@ pub struct HDTDataset {
 pub struct RemoteDataset {
     // host and port where these files are hosted
     authority: http::uri::Authority,
-    // list of filepaths
+    // list of file names
     files: Vec<String>,
     // http client options for communicating with remote server
     options: Option<RemoteClientOptions>,
@@ -136,7 +139,7 @@ impl RemoteDataset {
         p: Option<&str>,
         o: Option<&str>,
     ) -> Box<dyn Iterator<Item = (String, String, String)> + '_> {
-        // TODO follow Gitter chat for update async support
+        // TODO follow Gitter chat for updated async support so blocking client is not used
         let client = if self.options.is_some() {
             let opts = self.options.as_ref().unwrap().clone();
             let builder = reqwest::blocking::Client::builder().use_rustls_tls();
@@ -159,48 +162,111 @@ impl RemoteDataset {
         } else {
             format!("http://{authority}/query")
         };
-        let res = match client
-            .post(url)
-            .json(&Bgp {
-                files: self.files.clone(),
-                subject: s.map(|s| s.to_string()),
-                predicate: p.map(|s| s.to_string()),
-                object: o.map(|s| s.to_string()),
-            })
-            .send()
-        {
-            Ok(res) => res,
+
+        let bgp = Bgp {
+            files: self.files.clone(),
+            subject: s.map(|s| s.to_string()),
+            predicate: p.map(|s| s.to_string()),
+            object: o.map(|s| s.to_string()),
+        };
+
+        // TODO make number of attempts configurable
+        let attempts = 2;
+        for attempt in 0..attempts {
+            match self.send_bgp_request(client.clone(), authority, url.clone(), &bgp) {
+                Ok(r) => {
+                    debug!(
+                        "remote BGP request for host {:?} completed successfully",
+                        authority
+                    );
+                    return Box::new(r.into_iter());
+                }
+                Err(e) => {
+                    warn!(
+                        "attempt {:?} failed for host {}: {e}",
+                        attempt + 1,
+                        authority
+                    );
+                    // wait a few seconds between attempts
+                    // TODO implement exponential backoff retries
+                    let ticks = tick(Duration::from_secs(2));
+                    '_inner: loop {
+                        select! {
+                            recv(ticks) -> _ => {
+                                // don't break the outer attempts for loop
+                                break '_inner
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        error!(
+            "remote BGP request for host {:?} failed after {attempts} attempts",
+            authority
+        );
+        return Box::new(empty());
+    }
+
+    fn send_bgp_request(
+        &self,
+        client: reqwest::blocking::Client,
+        authority: &str,
+        url: String,
+        bgp: &Bgp,
+    ) -> Result<Vec<(String, String, String)>, Error> {
+        let res = match client.post(url).json(bgp).send() {
+            Ok(res) => {
+                if res.status() != StatusCode::OK {
+                    warn!(
+                        "oxigraph: bad status code on response for host {:?}: {}",
+                        authority,
+                        res.status()
+                    );
+                    return Err(Error::new(
+                        ErrorKind::Other,
+                        "bad status code on response from remote host",
+                    ));
+                }
+                res
+            }
             Err(e) => {
-                error!(
+                warn!(
                     "oxigraph: error during the request for host {:?}: {e}",
                     authority
                 );
-                return Box::new(empty());
+                return Err(Error::new(
+                    ErrorKind::Other,
+                    "error during the request to host",
+                ));
             }
         };
 
         let resp_body = match res.text() {
             Ok(res) => res,
             Err(e) => {
-                error!(
+                warn!(
                     "oxigraph: error reading response body for host {:?}: {e}",
                     authority
                 );
-                return Box::new(empty());
+                return Err(Error::new(
+                    ErrorKind::Other,
+                    "error reading response body for host",
+                ));
             }
         };
         let res: Vec<(String, String, String)> = match serde_json::from_str(&resp_body) {
             Ok(v) => v,
             Err(e) => {
-                error!("json error on the response: {e}");
-                return Box::new(empty());
+                warn!("json error on the response for host {:?}: {e}", authority);
+                return Err(Error::new(
+                    ErrorKind::Other,
+                    "json error on the response for host",
+                ));
             }
         };
-        debug!(
-            "remote query for host {:?} completed successfully",
-            authority
-        );
-        return Box::new(res.into_iter());
+        return Ok(res);
     }
 }
 
@@ -462,24 +528,49 @@ impl DatasetView for HDTDatasetView {
             }
         }
 
-        for (_, data) in self.remotes.iter() {
-            let results = data.remote_query(s.as_deref(), p.as_deref(), o.as_deref());
-            for result in results {
-                // Create OxRDF terms for the HDT result.
-                let ex_s = self.auto_term(&(*result.0)).unwrap();
-                let ex_p = self.auto_term(&(*result.1)).unwrap();
-                let ex_o = self.auto_term(&(*result.2)).unwrap();
+        if self.remotes.len() != 0 {
+            let (tx, rx) = mpsc::channel();
+            let mut handles = vec![];
+            // spawn parallel threads for each of the remote hosts
+            for (_, data) in self.remotes.iter() {
+                let tx1 = tx.clone();
+                let d = data.clone();
+                let sd = s.clone();
+                let pd = p.clone();
+                let od = o.clone();
+                let handle = thread::spawn(move || {
+                    let results = d.remote_query(sd.as_deref(), pd.as_deref(), od.as_deref());
+                    let v = results.collect::<Vec<(String, String, String)>>();
+                    tx1.send(v).unwrap();
+                });
+                handles.push(handle);
+            }
 
-                // Add the result to the vector.
-                v.push(Ok(EncodedQuad::new(
-                    ex_s,
-                    ex_p,
-                    ex_o,
-                    EncodedTerm::DefaultGraph,
-                )));
+            // wait for all parallel requests to finish
+            for handle in handles {
+                handle.join().unwrap()
+            }
+
+            // process all the results that came in on the channel
+            // every remote request results in a message on the channel, need to do one read for each remote server
+            for _ in 0..self.remotes.len() {
+                let triples = rx.recv().unwrap();
+                for triple in triples {
+                    // Create OxRDF terms for the HDT result.
+                    let ex_s = self.auto_term(&(*triple.0)).unwrap();
+                    let ex_p = self.auto_term(&(*triple.1)).unwrap();
+                    let ex_o = self.auto_term(&(*triple.2)).unwrap();
+
+                    // Add the result to the vector.
+                    v.push(Ok(EncodedQuad::new(
+                        ex_s,
+                        ex_p,
+                        ex_o,
+                        EncodedTerm::DefaultGraph,
+                    )));
+                }
             }
         }
-
         return Box::new(v.into_iter());
     }
 
