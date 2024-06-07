@@ -11,6 +11,7 @@ mod model;
 pub mod results;
 mod service;
 mod update;
+pub mod bgp;
 
 use crate::model::{NamedNode, Term};
 pub use crate::sparql::algebra::{Query, QueryDataset, Update};

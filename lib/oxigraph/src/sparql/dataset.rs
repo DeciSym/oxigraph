@@ -1,14 +1,17 @@
 use crate::model::{BlankNodeRef, NamedNodeRef, Term, TermRef};
 use crate::sparql::algebra::QueryDataset;
+use crate::sparql::bgp::query_client::QueryClient;
+use crate::sparql::bgp::{BgpRequest, BgpResponse};
 use crate::sparql::EvaluationError;
 use crate::storage::numeric_encoder::{
     insert_term, Decoder, EncodedQuad, EncodedTerm, StrHash, StrLookup,
 };
 use crate::storage::{StorageError, StorageReader};
 use crossbeam_channel::{select, tick};
+use futures::executor;
 use hdt::Hdt;
 use http::StatusCode;
-use log::{debug, error, warn};
+use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
@@ -18,8 +21,10 @@ use std::iter::empty;
 use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::{mpsc, Arc};
-use std::thread;
 use std::time::Duration;
+use tonic::transport::Channel;
+// use bgp::query_client::QueryClient;
+// use bgp::BgpRequest;
 /// Boundry between the query evaluator and the storage layer.
 pub trait DatasetView: Clone {
     fn encoded_quads_for_pattern(
@@ -110,21 +115,22 @@ pub struct RemoteDataset {
     files: Vec<String>,
     // http client options for communicating with remote server
     options: Option<RemoteClientOptions>,
+    client: QueryClient<Channel>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Bgp {
-    pub files: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(default)]
-    pub subject: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(default)]
-    pub predicate: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(default)]
-    pub object: Option<String>,
-}
+// #[derive(Debug, Serialize, Deserialize, Clone)]
+// pub struct Bgp {
+//     pub files: Vec<String>,
+//     #[serde(skip_serializing_if = "Option::is_none")]
+//     #[serde(default)]
+//     pub subject: Option<String>,
+//     #[serde(skip_serializing_if = "Option::is_none")]
+//     #[serde(default)]
+//     pub predicate: Option<String>,
+//     #[serde(skip_serializing_if = "Option::is_none")]
+//     #[serde(default)]
+//     pub object: Option<String>,
+// }
 
 #[derive(Debug, Clone)]
 pub struct RemoteClientOptions {
@@ -140,40 +146,35 @@ impl RemoteDataset {
         o: Option<&str>,
     ) -> Box<dyn Iterator<Item = (String, String, String)> + '_> {
         // TODO follow Gitter chat for updated async support so blocking client is not used
-        let client = if self.options.is_some() {
-            let opts = self.options.as_ref().unwrap().clone();
-            let builder = reqwest::blocking::Client::builder().use_rustls_tls();
-            builder
-                .tls_built_in_root_certs(false)
-                .add_root_certificate(opts.ca_cert)
-                .identity(opts.client_pem)
-                .https_only(true)
-                .min_tls_version(reqwest::tls::Version::TLS_1_3)
-                .danger_accept_invalid_certs(true)
-                .build()
-                .expect("invalid certs provided")
-        } else {
-            reqwest::blocking::Client::new()
-        };
+        // let client = if self.options.is_some() {
+        //     let opts = self.options.as_ref().unwrap().clone();
+        //     let builder = reqwest::blocking::Client::builder().use_rustls_tls();
+        //     builder
+        //         .tls_built_in_root_certs(false)
+        //         .add_root_certificate(opts.ca_cert)
+        //         .identity(opts.client_pem)
+        //         .https_only(true)
+        //         .min_tls_version(reqwest::tls::Version::TLS_1_3)
+        //         .danger_accept_invalid_certs(true)
+        //         .build()
+        //         .expect("invalid certs provided")
+        // } else {
+        //     reqwest::blocking::Client::new()
+        // };
 
         let authority = self.authority.as_str();
-        let url = if self.options.is_some() {
-            format!("https://{authority}/query")
-        } else {
-            format!("http://{authority}/query")
-        };
 
-        let bgp = Bgp {
+        let bgp = BgpRequest {
             files: self.files.clone(),
-            subject: s.map(|s| s.to_string()),
-            predicate: p.map(|s| s.to_string()),
-            object: o.map(|s| s.to_string()),
+            subject: s.map(|s| s.to_string()).unwrap_or_default(),
+            predicate: p.map(|s| s.to_string()).unwrap_or_default(),
+            object: o.map(|s| s.to_string()).unwrap_or_default(),
         };
-
+        info!("sending bgp request to {authority}");
         // TODO make number of attempts configurable
         let attempts = 2;
         for attempt in 0..attempts {
-            match self.send_bgp_request(client.clone(), authority, url.clone(), &bgp) {
+            match self.send_bgp_request(self.client.clone(), authority, bgp.clone()) {
                 Ok(r) => {
                     debug!(
                         "remote BGP request for host {:?} completed successfully",
@@ -211,26 +212,13 @@ impl RemoteDataset {
 
     fn send_bgp_request(
         &self,
-        client: reqwest::blocking::Client,
+        mut client: QueryClient<Channel>,
         authority: &str,
-        url: String,
-        bgp: &Bgp,
+        bgp: BgpRequest,
     ) -> Result<Vec<(String, String, String)>, Error> {
-        let res = match client.post(url).json(bgp).send() {
-            Ok(res) => {
-                if res.status() != StatusCode::OK {
-                    warn!(
-                        "oxigraph: bad status code on response for host {:?}: {}",
-                        authority,
-                        res.status()
-                    );
-                    return Err(Error::new(
-                        ErrorKind::Other,
-                        "bad status code on response from remote host",
-                    ));
-                }
-                res
-            }
+        let request = tonic::Request::new(bgp);
+        let response = match executor::block_on(client.single_bgp(request)) {
+            Ok(resp) => resp,
             Err(e) => {
                 warn!(
                     "oxigraph: error during the request for host {:?}: {e}",
@@ -242,31 +230,62 @@ impl RemoteDataset {
                 ));
             }
         };
+        let mut bgp_triples = Vec::<(String, String, String)>::new();
+        for res in response.get_ref().results.clone().into_iter() {
+            bgp_triples.push((res.item1, res.item2, res.item3));
+        }
+        return Ok(bgp_triples)
+        // let res = match client.post(url).json(bgp).send() {
+        //     Ok(res) => {
+        //         if res.status() != StatusCode::OK {
+        //             warn!(
+        //                 "oxigraph: bad status code on response for host {:?}: {}",
+        //                 authority,
+        //                 res.status()
+        //             );
+        //             return Err(Error::new(
+        //                 ErrorKind::Other,
+        //                 "bad status code on response from remote host",
+        //             ));
+        //         }
+        //         res
+        //     }
+        //     Err(e) => {
+        //         warn!(
+        //             "oxigraph: error during the request for host {:?}: {e}",
+        //             authority
+        //         );
+        //         return Err(Error::new(
+        //             ErrorKind::Other,
+        //             "error during the request to host",
+        //         ));
+        //     }
+        // };
 
-        let resp_body = match res.text() {
-            Ok(res) => res,
-            Err(e) => {
-                warn!(
-                    "oxigraph: error reading response body for host {:?}: {e}",
-                    authority
-                );
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    "error reading response body for host",
-                ));
-            }
-        };
-        let res: Vec<(String, String, String)> = match serde_json::from_str(&resp_body) {
-            Ok(v) => v,
-            Err(e) => {
-                warn!("json error on the response for host {:?}: {e}", authority);
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    "json error on the response for host",
-                ));
-            }
-        };
-        return Ok(res);
+        // let resp_body = match res.text() {
+        //     Ok(res) => res,
+        //     Err(e) => {
+        //         warn!(
+        //             "oxigraph: error reading response body for host {:?}: {e}",
+        //             authority
+        //         );
+        //         return Err(Error::new(
+        //             ErrorKind::Other,
+        //             "error reading response body for host",
+        //         ));
+        //     }
+        // };
+        // let res: Vec<(String, String, String)> = match serde_json::from_str(&resp_body) {
+        //     Ok(v) => v,
+        //     Err(e) => {
+        //         warn!("json error on the response for host {:?}: {e}", authority);
+        //         return Err(Error::new(
+        //             ErrorKind::Other,
+        //             "json error on the response for host",
+        //         ));
+        //     }
+        // };
+        //return Ok(res);
     }
 }
 
@@ -333,6 +352,20 @@ impl HDTDatasetView {
             } else if uri.scheme_str().unwrap() == "de" {
                 let authority = uri.authority().unwrap().to_string();
                 let file = uri.path().to_string();
+
+                let url = if options.is_some() {
+                    format!("https://{authority}/query")
+                } else {
+                    format!("http://{authority}")
+                };
+                let mut client = match executor::block_on(QueryClient::connect(url.clone())) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!("failed to init client for host {:?}: {e}", authority);
+                        continue;
+                    }
+                };
+
                 if remotes.contains_key(&authority) {
                     let entry: &RemoteDataset = remotes.get(&authority).unwrap();
                     let mut files = vec![file.replacen("/", "", 1)];
@@ -343,6 +376,7 @@ impl HDTDatasetView {
                             authority: uri.authority().unwrap().clone(),
                             files,
                             options: options.clone(),
+                            client: client.clone(),
                         },
                     );
                 } else {
@@ -352,6 +386,7 @@ impl HDTDatasetView {
                             authority: uri.authority().unwrap().clone(),
                             files: vec![file.replacen("/", "", 1)],
                             options: options.clone(),
+                            client: client.clone(),
                         },
                     );
                 }
@@ -532,13 +567,14 @@ impl DatasetView for HDTDatasetView {
             let (tx, rx) = mpsc::channel();
             let mut handles = vec![];
             // spawn parallel threads for each of the remote hosts
+            let rt = tokio::runtime::Runtime::new().unwrap();
             for (_, data) in self.remotes.iter() {
                 let tx1 = tx.clone();
                 let d = data.clone();
                 let sd = s.clone();
                 let pd = p.clone();
                 let od = o.clone();
-                let handle = thread::spawn(move || {
+                let handle = rt.spawn_blocking(move || {
                     let results = d.remote_query(sd.as_deref(), pd.as_deref(), od.as_deref());
                     let v = results.collect::<Vec<(String, String, String)>>();
                     tx1.send(v).unwrap();
@@ -548,7 +584,12 @@ impl DatasetView for HDTDatasetView {
 
             // wait for all parallel requests to finish
             for handle in handles {
-                handle.join().unwrap()
+                match rt.block_on(handle) {
+                    Ok(_) => {},
+                    Err(e) => {
+                        error!("thread error: {e}")
+                    }
+                }
             }
 
             // process all the results that came in on the channel
