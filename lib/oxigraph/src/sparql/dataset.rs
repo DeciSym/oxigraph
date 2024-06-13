@@ -22,7 +22,8 @@ use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
-use tonic::transport::Channel;
+use tonic::codec::CompressionEncoding;
+use tonic::transport::{Channel, ClientTlsConfig};
 // use bgp::query_client::QueryClient;
 // use bgp::BgpRequest;
 /// Boundry between the query evaluator and the storage layer.
@@ -134,8 +135,8 @@ pub struct RemoteDataset {
 
 #[derive(Debug, Clone)]
 pub struct RemoteClientOptions {
-    pub ca_cert: reqwest::Certificate,
-    pub client_pem: reqwest::Identity,
+    pub ca_cert: tonic::transport::Certificate,
+    pub client_pem: tonic::transport::Identity,
 }
 
 impl RemoteDataset {
@@ -234,58 +235,7 @@ impl RemoteDataset {
         for res in response.get_ref().results.clone().into_iter() {
             bgp_triples.push((res.item1, res.item2, res.item3));
         }
-        return Ok(bgp_triples)
-        // let res = match client.post(url).json(bgp).send() {
-        //     Ok(res) => {
-        //         if res.status() != StatusCode::OK {
-        //             warn!(
-        //                 "oxigraph: bad status code on response for host {:?}: {}",
-        //                 authority,
-        //                 res.status()
-        //             );
-        //             return Err(Error::new(
-        //                 ErrorKind::Other,
-        //                 "bad status code on response from remote host",
-        //             ));
-        //         }
-        //         res
-        //     }
-        //     Err(e) => {
-        //         warn!(
-        //             "oxigraph: error during the request for host {:?}: {e}",
-        //             authority
-        //         );
-        //         return Err(Error::new(
-        //             ErrorKind::Other,
-        //             "error during the request to host",
-        //         ));
-        //     }
-        // };
-
-        // let resp_body = match res.text() {
-        //     Ok(res) => res,
-        //     Err(e) => {
-        //         warn!(
-        //             "oxigraph: error reading response body for host {:?}: {e}",
-        //             authority
-        //         );
-        //         return Err(Error::new(
-        //             ErrorKind::Other,
-        //             "error reading response body for host",
-        //         ));
-        //     }
-        // };
-        // let res: Vec<(String, String, String)> = match serde_json::from_str(&resp_body) {
-        //     Ok(v) => v,
-        //     Err(e) => {
-        //         warn!("json error on the response for host {:?}: {e}", authority);
-        //         return Err(Error::new(
-        //             ErrorKind::Other,
-        //             "json error on the response for host",
-        //         ));
-        //     }
-        // };
-        //return Ok(res);
+        return Ok(bgp_triples);
     }
 }
 
@@ -352,14 +302,43 @@ impl HDTDatasetView {
             } else if uri.scheme_str().unwrap() == "de" {
                 let authority = uri.authority().unwrap().to_string();
                 let file = uri.path().to_string();
+                let host = uri.host().unwrap().to_string();
 
-                let url = if options.is_some() {
-                    format!("https://{authority}/query")
+                let channel = if let Some(opts) = options {
+                    let c = match Channel::from_shared(format!("https://{authority}")) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            error!("failed to parse url for host {:?}: {e}", authority);
+                            continue;
+                        }
+                    };
+                    let tls = ClientTlsConfig::new()
+                        .ca_certificate(opts.ca_cert.clone())
+                        .identity(opts.client_pem.clone())
+                        .domain_name(host.clone());
+                    match c.tls_config(tls) {
+                        Ok(endpoint) => endpoint,
+                        Err(e) => {
+                            error!(
+                                "failed to configure tls config for host {:?}: {e}",
+                                host
+                            );
+                            continue;
+                        }
+                    }
                 } else {
-                    format!("http://{authority}")
+                    match Channel::from_shared(format!("http://{authority}")) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            error!("failed to parse url for host {:?}: {e}", authority);
+                            continue;
+                        }
+                    }
                 };
-                let mut client = match executor::block_on(QueryClient::connect(url.clone())) {
-                    Ok(v) => v,
+                let mut client = match executor::block_on(QueryClient::connect(channel.clone())) {
+                    Ok(v) => v
+                        .accept_compressed(CompressionEncoding::Gzip)
+                        .send_compressed(CompressionEncoding::Gzip),
                     Err(e) => {
                         error!("failed to init client for host {:?}: {e}", authority);
                         continue;
@@ -585,7 +564,7 @@ impl DatasetView for HDTDatasetView {
             // wait for all parallel requests to finish
             for handle in handles {
                 match rt.block_on(handle) {
-                    Ok(_) => {},
+                    Ok(_) => {}
                     Err(e) => {
                         error!("thread error: {e}")
                     }
