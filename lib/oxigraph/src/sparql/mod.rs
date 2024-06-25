@@ -11,6 +11,8 @@ mod model;
 pub mod results;
 mod service;
 mod update;
+#[allow(clippy::all)]
+#[allow(unused_qualifications)]
 pub mod bgp;
 
 use crate::model::{NamedNode, Term};

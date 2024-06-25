@@ -1,7 +1,7 @@
 use crate::model::{BlankNodeRef, NamedNodeRef, Term, TermRef};
 use crate::sparql::algebra::QueryDataset;
 use crate::sparql::bgp::query_client::QueryClient;
-use crate::sparql::bgp::{BgpRequest, BgpResponse};
+use crate::sparql::bgp::BgpRequest;
 use crate::sparql::EvaluationError;
 use crate::storage::numeric_encoder::{
     insert_term, Decoder, EncodedQuad, EncodedTerm, StrHash, StrLookup,
@@ -10,9 +10,7 @@ use crate::storage::{StorageError, StorageReader};
 use crossbeam_channel::{select, tick};
 use futures::executor;
 use hdt::Hdt;
-use http::StatusCode;
 use log::{debug, error, info, warn};
-use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -114,24 +112,9 @@ pub struct RemoteDataset {
     authority: http::uri::Authority,
     // list of file names
     files: Vec<String>,
-    // http client options for communicating with remote server
-    options: Option<RemoteClientOptions>,
+    // intialized client to communicate with gRPC server
     client: QueryClient<Channel>,
 }
-
-// #[derive(Debug, Serialize, Deserialize, Clone)]
-// pub struct Bgp {
-//     pub files: Vec<String>,
-//     #[serde(skip_serializing_if = "Option::is_none")]
-//     #[serde(default)]
-//     pub subject: Option<String>,
-//     #[serde(skip_serializing_if = "Option::is_none")]
-//     #[serde(default)]
-//     pub predicate: Option<String>,
-//     #[serde(skip_serializing_if = "Option::is_none")]
-//     #[serde(default)]
-//     pub object: Option<String>,
-// }
 
 #[derive(Debug, Clone)]
 pub struct RemoteClientOptions {
@@ -146,23 +129,6 @@ impl RemoteDataset {
         p: Option<&str>,
         o: Option<&str>,
     ) -> Box<dyn Iterator<Item = (String, String, String)> + '_> {
-        // TODO follow Gitter chat for updated async support so blocking client is not used
-        // let client = if self.options.is_some() {
-        //     let opts = self.options.as_ref().unwrap().clone();
-        //     let builder = reqwest::blocking::Client::builder().use_rustls_tls();
-        //     builder
-        //         .tls_built_in_root_certs(false)
-        //         .add_root_certificate(opts.ca_cert)
-        //         .identity(opts.client_pem)
-        //         .https_only(true)
-        //         .min_tls_version(reqwest::tls::Version::TLS_1_3)
-        //         .danger_accept_invalid_certs(true)
-        //         .build()
-        //         .expect("invalid certs provided")
-        // } else {
-        //     reqwest::blocking::Client::new()
-        // };
-
         let authority = self.authority.as_str();
 
         let bgp = BgpRequest {
@@ -171,7 +137,7 @@ impl RemoteDataset {
             predicate: p.map(|s| s.to_string()).unwrap_or_default(),
             object: o.map(|s| s.to_string()).unwrap_or_default(),
         };
-        info!("sending bgp request to {authority}");
+        debug!("sending bgp request to {authority}");
         // TODO make number of attempts configurable
         let attempts = 2;
         for attempt in 0..attempts {
@@ -319,10 +285,7 @@ impl HDTDatasetView {
                     match c.tls_config(tls) {
                         Ok(endpoint) => endpoint,
                         Err(e) => {
-                            error!(
-                                "failed to configure tls config for host {:?}: {e}",
-                                host
-                            );
+                            error!("failed to configure tls config for host {:?}: {e}", host);
                             continue;
                         }
                     }
@@ -335,7 +298,7 @@ impl HDTDatasetView {
                         }
                     }
                 };
-                let mut client = match executor::block_on(QueryClient::connect(channel.clone())) {
+                let client = match executor::block_on(QueryClient::connect(channel.clone())) {
                     Ok(v) => v
                         .accept_compressed(CompressionEncoding::Gzip)
                         .send_compressed(CompressionEncoding::Gzip),
@@ -354,7 +317,6 @@ impl HDTDatasetView {
                         RemoteDataset {
                             authority: uri.authority().unwrap().clone(),
                             files,
-                            options: options.clone(),
                             client: client.clone(),
                         },
                     );
@@ -364,7 +326,6 @@ impl HDTDatasetView {
                         RemoteDataset {
                             authority: uri.authority().unwrap().clone(),
                             files: vec![file.replacen("/", "", 1)],
-                            options: options.clone(),
                             client: client.clone(),
                         },
                     );
@@ -410,7 +371,7 @@ impl HDTDatasetView {
                         }
                     }
 
-                    Term::BlankNode(s) => Some(decoded_term.to_string()),
+                    Term::BlankNode(_s) => Some(decoded_term.to_string()),
 
                     // Otherwise use the string directly.
                     _ => Some(decoded_term.to_string()),
@@ -474,7 +435,7 @@ impl HDTDatasetView {
             // unclear why the "_:" prefix needs to be dropped from s
             Some('_') => {
                 let term = oxrdf::BlankNode::new(&s[2..]).unwrap();
-                let val = self.encode_term(&term);
+                let _val = self.encode_term(&term);
                 Ok(EncodedTerm::from(BlankNodeRef::new_unchecked(*Arc::from(
                     &s[2..],
                 ))))

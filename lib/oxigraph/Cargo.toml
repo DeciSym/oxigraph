@@ -54,7 +54,7 @@ crossbeam-channel = "0.5.13"
 tonic = { version = "0.11.0", features = ["gzip", "tls"] }
 prost = "0.12.6"
 futures = "0.3.30"
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 libc.workspace = true
