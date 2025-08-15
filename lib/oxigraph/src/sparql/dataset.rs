@@ -152,9 +152,9 @@ impl QueryableDataset for HDTDatasetView {
 
             // For each result
             for result in results {
-                let ex_s = (*result.0).to_string();
-                let ex_p = (*result.1).to_string();
-                let ex_o = (*result.2).to_string();
+                let ex_s = (*result[0]).to_string();
+                let ex_p = (*result[1]).to_string();
+                let ex_o = (*result[2]).to_string();
 
                 // Add the result to the vector.
                 v.push(Ok(InternalQuad {

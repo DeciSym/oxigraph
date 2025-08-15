@@ -752,16 +752,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "eyre"
-version = "0.6.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cd915d99f24784cdc19fd37ef22b97e3ff0ae756c7e492e9fbfe897d61e2aec"
-dependencies = [
- "indenter",
- "once_cell",
-]
-
-[[package]]
 name = "fastrand"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1002,13 +992,12 @@ dependencies = [
 
 [[package]]
 name = "hdt"
-version = "0.3.0"
-source = "git+https://github.com/KonradHoeffner/hdt/#37aa088f95a9ecd402482800e06b4c9233277216"
+version = "0.4.0-alpha"
+source = "git+https://github.com/GregHanson/hdt/?branch=w3c-rdf-tests#1b0820dff92040287ac660fa1c6205428d1f2aa5"
 dependencies = [
  "bincode",
  "bytesize",
  "crc",
- "eyre",
  "iref",
  "langtag",
  "log",
@@ -1257,12 +1246,6 @@ dependencies = [
  "walkdir",
  "winapi-util",
 ]
-
-[[package]]
-name = "indenter"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce23b50ad8242c51a442f3ff322d56b02f08852c77e4c0b4d3fd684abc89c683"
 
 [[package]]
 name = "indoc"
@@ -2567,9 +2550,8 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "sucds"
-version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d53d46182afe6ed822a94c54a532dc0d59691a8f49226bdc4596529ca864cdd6"
+version = "0.8.2"
+source = "git+https://github.com/kampersanda/sucds.git?rev=46e8cbe#46e8cbeca4bbe2885eac1138fb0d625d453c34f8"
 dependencies = [
  "anyhow",
  "num-traits",

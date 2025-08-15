@@ -39,7 +39,7 @@ sparesults = { workspace = true, features = ["rdf-star"] }
 spargebra = { workspace = true, features = ["rdf-star", "sep-0002", "sep-0006"] }
 spareval = { workspace = true, features = ["rdf-star", "sep-0002", "sep-0006", "calendar-ext"] }
 thiserror.workspace = true
-hdt = { git = "https://github.com/KonradHoeffner/hdt/", default-features = false, features = ["cache"] }
+hdt = { git = "https://github.com/GregHanson/hdt/", default-features = false, features = ["cache"], branch = "w3c-rdf-tests" }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 libc.workspace = true
