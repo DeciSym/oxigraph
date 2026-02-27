@@ -1262,9 +1262,9 @@ dependencies = [
 
 [[package]]
 name = "json-event-parser"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73267b6bffa5356bd46cfa89386673e9a7f62f4eb3adcb45b1bd031892357853"
+checksum = "574b0cd5e90ee2ba03a66d0611fc9a09c9a0c28b2ecc2dc8a181dd31a53ca5d7"
 dependencies = [
  "tokio",
 ]
@@ -1554,16 +1554,16 @@ dependencies = [
  "libc",
  "oxhttp",
  "oxiri",
- "oxrdf",
+ "oxrdf 0.3.0-beta.2",
  "oxrdfio",
  "oxrocksdb-sys",
- "oxsdatatypes",
+ "oxsdatatypes 0.2.2",
  "rand",
  "rustc-hash",
  "siphasher",
- "sparesults",
+ "sparesults 0.3.0-beta.3",
  "spareval",
- "spargebra",
+ "spargebra 0.4.5",
  "thiserror 2.0.16",
 ]
 
@@ -1612,9 +1612,9 @@ dependencies = [
  "oxjsonld",
  "oxttl",
  "spareval",
- "spargebra",
+ "spargebra 0.4.5",
  "spargeo",
- "sparopt",
+ "sparopt 0.3.5",
  "text-diff",
  "time",
 ]
@@ -1640,7 +1640,7 @@ version = "0.2.0-beta.2"
 dependencies = [
  "json-event-parser",
  "oxiri",
- "oxrdf",
+ "oxrdf 0.3.0-beta.2",
  "thiserror 2.0.16",
  "tokio",
 ]
@@ -1651,10 +1651,23 @@ version = "0.3.0-beta.2"
 dependencies = [
  "oxilangtag",
  "oxiri",
- "oxsdatatypes",
+ "oxsdatatypes 0.2.2",
  "rand",
  "serde",
  "serde_json",
+ "thiserror 2.0.16",
+]
+
+[[package]]
+name = "oxrdf"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0afd5c28e4a399c57ee2bc3accd40c7b671fdc7b6537499f14e95b265af7d7e0"
+dependencies = [
+ "oxilangtag",
+ "oxiri",
+ "oxsdatatypes 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "rand",
  "thiserror 2.0.16",
 ]
 
@@ -1663,7 +1676,7 @@ name = "oxrdfio"
 version = "0.2.0-beta.3"
 dependencies = [
  "oxjsonld",
- "oxrdf",
+ "oxrdf 0.3.0-beta.2",
  "oxrdfxml",
  "oxttl",
  "thiserror 2.0.16",
@@ -1676,7 +1689,7 @@ version = "0.2.0-beta.2"
 dependencies = [
  "oxilangtag",
  "oxiri",
- "oxrdf",
+ "oxrdf 0.3.0-beta.2",
  "quick-xml",
  "thiserror 2.0.16",
  "tokio",
@@ -1700,13 +1713,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxsdatatypes"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06fa874d87eae638daae9b4e3198864fe2cce68589f227c0b2cf5b62b1530516"
+dependencies = [
+ "thiserror 2.0.16",
+]
+
+[[package]]
 name = "oxttl"
 version = "0.2.0-beta.3"
 dependencies = [
  "memchr",
  "oxilangtag",
  "oxiri",
- "oxrdf",
+ "oxrdf 0.3.0-beta.2",
  "rayon",
  "thiserror 2.0.16",
  "tokio",
@@ -2364,40 +2386,67 @@ version = "0.3.0-beta.3"
 dependencies = [
  "json-event-parser",
  "memchr",
- "oxrdf",
+ "oxrdf 0.3.0-beta.2",
  "quick-xml",
  "thiserror 2.0.16",
  "tokio",
 ]
 
 [[package]]
+name = "sparesults"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e13362decdcbeb3fefadff1631238c835c112027221e83d217cc5779f5a81c2"
+dependencies = [
+ "json-event-parser",
+ "memchr",
+ "oxrdf 0.3.3",
+ "quick-xml",
+ "thiserror 2.0.16",
+]
+
+[[package]]
 name = "spareval"
-version = "0.2.0-beta.4"
+version = "0.2.5"
 dependencies = [
  "hex",
  "json-event-parser",
  "md-5",
  "oxiri",
- "oxrdf",
- "oxsdatatypes",
+ "oxrdf 0.3.3",
+ "oxsdatatypes 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "rand",
  "regex",
  "rustc-hash",
  "sha1",
  "sha2",
- "sparesults",
- "spargebra",
- "sparopt",
+ "sparesults 0.3.3",
+ "spargebra 0.4.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sparopt 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "thiserror 2.0.16",
 ]
 
 [[package]]
 name = "spargebra"
-version = "0.4.0-beta.3"
+version = "0.4.5"
 dependencies = [
  "oxilangtag",
  "oxiri",
- "oxrdf",
+ "oxrdf 0.3.3",
+ "peg",
+ "rand",
+ "thiserror 2.0.16",
+]
+
+[[package]]
+name = "spargebra"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9a6bc0ae1da1bf2516fb872d2ad0cf5efa3c7a7dbea58909b39eed321dc5117"
+dependencies = [
+ "oxilangtag",
+ "oxiri",
+ "oxrdf 0.3.3",
  "peg",
  "rand",
  "thiserror 2.0.16",
@@ -2416,11 +2465,22 @@ dependencies = [
 
 [[package]]
 name = "sparopt"
-version = "0.3.0-beta.3"
+version = "0.3.5"
 dependencies = [
- "oxrdf",
+ "oxrdf 0.3.3",
  "rand",
- "spargebra",
+ "spargebra 0.4.5 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "sparopt"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a92f04f2f713fa83c9e2eda54978bc990fe801a23186bb7893530797b97ebcb"
+dependencies = [
+ "oxrdf 0.3.3",
+ "rand",
+ "spargebra 0.4.5 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
