@@ -1,4 +1,5 @@
 #![allow(clippy::ignored_unit_patterns)]
+
 use crate::algebra::*;
 use crate::query::*;
 use crate::term::*;
@@ -9,9 +10,13 @@ use oxrdf::vocab::{rdf, xsd};
 use peg::parser;
 use peg::str::LineCol;
 use rand::random;
+#[cfg(feature = "standard-unicode-escaping")]
+use std::borrow::Cow;
 use std::char;
 use std::collections::{HashMap, HashSet};
 use std::mem::take;
+#[cfg(feature = "standard-unicode-escaping")]
+use std::str::Chars;
 use std::str::FromStr;
 
 /// A SPARQL parser
@@ -109,13 +114,25 @@ impl SparqlParser {
     /// assert_eq!(query.to_string(), query_str);
     /// # Ok::<_, spargebra::SparqlSyntaxError>(())
     /// ```
+    #[cfg_attr(
+        not(feature = "standard-unicode-escaping"),
+        expect(clippy::needless_borrow)
+    )]
     pub fn parse_query(self, query: &str) -> Result<Query, SparqlSyntaxError> {
+        if has_longest_token_relational_ambiguity(query) {
+            return Err(SparqlSyntaxErrorKind::LongestTokenAmbiguity(
+                "query contains a longest-token ambiguity around '<...>' in a relational expression",
+            )
+            .into());
+        }
         let mut state = ParserState::new(
             self.base_iri,
             self.prefixes,
             self.custom_aggregate_functions,
         );
-        Ok(parser::QueryUnit(query, &mut state).map_err(SparqlSyntaxErrorKind::Syntax)?)
+        #[cfg(feature = "standard-unicode-escaping")]
+        let query = unescape_unicode_codepoints(query);
+        Ok(parser::QueryUnit(&query, &mut state).map_err(SparqlSyntaxErrorKind::Syntax)?)
     }
 
     /// Parse the given update string using the already set options.
@@ -128,14 +145,20 @@ impl SparqlParser {
     /// assert_eq!(update.to_string().trim(), update_str);
     /// # Ok::<_, spargebra::SparqlSyntaxError>(())
     /// ```
+    #[cfg_attr(
+        not(feature = "standard-unicode-escaping"),
+        expect(clippy::needless_borrow)
+    )]
     pub fn parse_update(self, update: &str) -> Result<Update, SparqlSyntaxError> {
         let mut state = ParserState::new(
             self.base_iri,
             self.prefixes,
             self.custom_aggregate_functions,
         );
+        #[cfg(feature = "standard-unicode-escaping")]
+        let update = unescape_unicode_codepoints(update);
         let operations =
-            parser::UpdateInit(update, &mut state).map_err(SparqlSyntaxErrorKind::Syntax)?;
+            parser::UpdateInit(&update, &mut state).map_err(SparqlSyntaxErrorKind::Syntax)?;
         check_if_insert_data_are_sharing_blank_nodes(&operations)?;
         Ok(Update {
             operations,
@@ -166,6 +189,129 @@ enum SparqlSyntaxErrorKind {
     Syntax(#[from] peg::error::ParseError<LineCol>),
     #[error("The blank node {0} cannot be shared by multiple blocks")]
     SharedBlankNode(BlankNode),
+    #[error("{0}")]
+    LongestTokenAmbiguity(&'static str),
+}
+
+fn has_longest_token_relational_ambiguity(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    let mut i = 0usize;
+    while i + 4 < bytes.len() {
+        if bytes[i] == b'<' && bytes[i + 1] == b'?' {
+            let mut j = i + 2;
+            while j < bytes.len() && bytes[j] != b'>' {
+                j += 1;
+            }
+            if j < bytes.len()
+                && j + 1 < bytes.len()
+                && bytes[j + 1] == b'?'
+                && input[i + 1..j].contains("&&?")
+            {
+                return true;
+            }
+            i = j.saturating_add(1);
+            continue;
+        }
+        i += 1;
+    }
+    false
+}
+
+#[cfg(feature = "standard-unicode-escaping")]
+fn unescape_unicode_codepoints(input: &str) -> Cow<'_, str> {
+    if needs_unescape_unicode_codepoints(input) {
+        UnescapeUnicodeCharIterator::new(input).collect()
+    } else {
+        input.into()
+    }
+}
+
+#[cfg(feature = "standard-unicode-escaping")]
+fn needs_unescape_unicode_codepoints(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    for i in 1..bytes.len() {
+        if (bytes[i] == b'u' || bytes[i] == b'U') && bytes[i - 1] == b'\\' {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(feature = "standard-unicode-escaping")]
+struct UnescapeUnicodeCharIterator<'a> {
+    iter: Chars<'a>,
+    buffer: String,
+}
+
+#[cfg(feature = "standard-unicode-escaping")]
+impl<'a> UnescapeUnicodeCharIterator<'a> {
+    fn new(string: &'a str) -> Self {
+        Self {
+            iter: string.chars(),
+            buffer: String::with_capacity(9),
+        }
+    }
+}
+
+#[cfg(feature = "standard-unicode-escaping")]
+impl<'a> Iterator for UnescapeUnicodeCharIterator<'a> {
+    type Item = char;
+
+    fn next(&mut self) -> Option<char> {
+        let c = if self.buffer.is_empty() {
+            self.iter.next()?
+        } else {
+            self.buffer.remove(0)
+        };
+        match c {
+            '\\' => match self.iter.next() {
+                Some('u') => {
+                    self.buffer.push('u');
+                    for _ in 0..4 {
+                        if let Some(c) = self.iter.next() {
+                            self.buffer.push(c);
+                        } else {
+                            return Some('\\');
+                        }
+                    }
+                    if let Some(c) = u32::from_str_radix(&self.buffer[1..], 16)
+                        .ok()
+                        .and_then(char::from_u32)
+                    {
+                        self.buffer.clear();
+                        Some(c)
+                    } else {
+                        Some('\\')
+                    }
+                }
+                Some('U') => {
+                    self.buffer.push('U');
+                    for _ in 0..8 {
+                        if let Some(c) = self.iter.next() {
+                            self.buffer.push(c);
+                        } else {
+                            return Some('\\');
+                        }
+                    }
+                    if let Some(c) = u32::from_str_radix(&self.buffer[1..], 16)
+                        .ok()
+                        .and_then(char::from_u32)
+                    {
+                        self.buffer.clear();
+                        Some(c)
+                    } else {
+                        Some('\\')
+                    }
+                }
+                Some(c) => {
+                    self.buffer.push(c);
+                    Some('\\')
+                }
+                None => Some('\\'),
+            },
+            _ => Some(c),
+        }
+    }
 }
 
 struct ReifiedTerm {
@@ -324,7 +470,7 @@ fn add_triple_to_triple_or_path_patterns(
             TriplePattern {
                 subject: reifier.clone(),
                 predicate: rdf::REIFIES.into_owned().into(),
-                object: triple.clone().object,
+                object: triple.clone().into(),
             }
             .into(),
         );
@@ -430,7 +576,7 @@ enum PartialGraphPattern {
 fn new_join(l: GraphPattern, r: GraphPattern) -> GraphPattern {
     // Avoid to output empty BGPs
     if let GraphPattern::Bgp { patterns: pl } = &l {
-        if pl.is_empty() {
+        if pl.is_empty() && !matches!(&r, GraphPattern::Filter { .. }) {
             return r;
         }
     }
@@ -446,7 +592,7 @@ fn new_join(l: GraphPattern, r: GraphPattern) -> GraphPattern {
             GraphPattern::Bgp { patterns: pl }
         }
         (GraphPattern::Bgp { patterns }, other) | (other, GraphPattern::Bgp { patterns })
-            if patterns.is_empty() =>
+            if patterns.is_empty() && !matches!(&other, GraphPattern::Filter { .. }) =>
         {
             other
         }
@@ -949,7 +1095,7 @@ parser! {
 
         pub rule UpdateInit() -> Vec<GraphUpdateOperation> = Update()
 
-        rule Prologue() = (BaseDecl() _ / PrefixDecl() _)* {}
+        rule Prologue() = (BaseDecl() _ / PrefixDecl() _ / VersionDecl() _)* {}
 
         rule BaseDecl() = i("BASE") _ i:IRIREF() {
             state.base_iri = Some(i)
@@ -958,6 +1104,16 @@ parser! {
         rule PrefixDecl() = i("PREFIX") _ ns:PNAME_NS() _ i:IRIREF() {
             state.prefixes.insert(ns.into(), i.into_inner());
         }
+
+        rule VersionDecl() = i("VERSION") _ VersionSpecifier() {?
+            if cfg!(feature = "sparql-12") {
+                Ok(())
+            } else {
+                Err("The VERSION declaration is only supported in SPARQL 1.2")
+            }
+        }
+
+        rule VersionSpecifier() = STRING_LITERAL1() / STRING_LITERAL2() {}
 
         rule SelectQuery() -> Query = s:SelectClause() _ d:DatasetClauses() _ w:WhereClause() _ g:GroupClause()? _ h:HavingClause()? _ o:OrderClause()? _ l:LimitOffsetClauses()? _ v:ValuesClause() {?
             Ok(Query::Select {
@@ -1109,7 +1265,7 @@ parser! {
             not_empty_fold(e.into_iter(), |a, b| Expression::And(Box::new(a), Box::new(b)))
         }
 
-        rule HavingCondition() -> Expression = Constraint()
+        rule HavingCondition() -> Expression = c:Constraint() _ { c }
 
         rule OrderClause() -> Vec<OrderExpression> = i("ORDER") _ i("BY") _ c:OrderClause_item()+ { c }
         rule OrderClause_item() -> OrderExpression = c:OrderCondition() _ { c }
@@ -1475,10 +1631,12 @@ parser! {
         rule InlineDataOneVar_value() -> Vec<Option<GroundTerm>> = t:DataBlockValue() _ { vec![t] }
 
         rule InlineDataFull() -> (Vec<Variable>, Vec<Vec<Option<GroundTerm>>>) = "(" _ vars:InlineDataFull_var()* _ ")" _ "{" _ vals:InlineDataFull_values()* "}" {?
-            if vals.iter().all(|vs| vs.len() == vars.len()) {
-                Ok((vars, vals))
-            } else {
+            if vars.iter().enumerate().any(|(i, vl)| vars[i+1..].contains(vl)) {
+                Err("Repeated variables are not allowed in VALUES clauses.")
+            } else if vals.iter().any(|vs| vs.len() != vars.len()) {
                 Err("The VALUES clause rows should have exactly the same number of values as there are variables. To set a value to undefined use UNDEF.")
+            } else {
+                Ok((vars, vals))
             }
         }
         rule InlineDataFull_var() -> Variable = v:Var() _ { v }
@@ -1602,25 +1760,15 @@ parser! {
         }
         rule ObjectList_item() -> FocusedTriplePattern<ReifiedTerm> = o:Object() _ { o }
 
-        rule Object() -> FocusedTriplePattern<ReifiedTerm> = g:GraphNode() _ a:Annotation()? {
-            if let Some(a) = a {
-                let mut patterns = g.patterns;
-                patterns.extend(a.patterns);
-                FocusedTriplePattern {
-                    focus: ReifiedTerm {
-                        term: g.focus,
-                        reifiers: a.focus
-                    },
-                    patterns
-                }
-            } else {
-                FocusedTriplePattern {
-                    focus: ReifiedTerm {
-                        term: g.focus,
-                        reifiers: Vec::new()
-                    },
-                    patterns: g.patterns
-                }
+        rule Object() -> FocusedTriplePattern<ReifiedTerm> = g:GraphNode() _ a:Annotation() {
+            let mut patterns = g.patterns;
+            patterns.extend(a.patterns);
+            FocusedTriplePattern {
+                focus: ReifiedTerm {
+                    term: g.focus,
+                    reifiers: a.focus
+                },
+                patterns
             }
         }
 
@@ -1687,25 +1835,15 @@ parser! {
         }
         rule ObjectListPath_item() -> FocusedTripleOrPathPattern<ReifiedTerm> = o:ObjectPath() _ { o }
 
-        rule ObjectPath() -> FocusedTripleOrPathPattern<ReifiedTerm> = g:GraphNodePath() _ a:AnnotationPath()? {
-             if let Some(a) = a {
-                let mut patterns = g.patterns;
-                patterns.extend(a.patterns);
-                FocusedTripleOrPathPattern {
-                    focus: ReifiedTerm {
-                        term: g.focus,
-                        reifiers: a.focus
-                    },
-                    patterns
-                }
-            } else {
-                FocusedTripleOrPathPattern {
-                    focus: ReifiedTerm {
-                        term: g.focus,
-                        reifiers: Vec::new()
-                    },
-                    patterns: g.patterns
-                }
+        rule ObjectPath() -> FocusedTripleOrPathPattern<ReifiedTerm> = g:GraphNodePath() _ a:AnnotationPath() {
+            let mut patterns = g.patterns;
+            patterns.extend(a.patterns);
+            FocusedTripleOrPathPattern {
+                focus: ReifiedTerm {
+                    term: g.focus,
+                    reifiers: a.focus
+                },
+                patterns
             }
         }
 
@@ -1965,14 +2103,7 @@ parser! {
             }
         }
 
-        rule ReifiedTripleSubject() -> FocusedTriplePattern<TermPattern> =
-            v:Var() { FocusedTriplePattern::new(v) } /
-            ReifiedTriple() /
-            i:iri() { FocusedTriplePattern::new(i) } /
-            l:RDFLiteral() { FocusedTriplePattern::new(l) } /
-            l:NumericLiteral() { FocusedTriplePattern::new(l) } /
-            l:BooleanLiteral() { FocusedTriplePattern::new(l) } /
-            b:BlankNode() { FocusedTriplePattern::new(b) }
+        rule ReifiedTripleSubject() -> FocusedTriplePattern<TermPattern> = ReifiedTripleObject()
 
         rule ReifiedTripleObject() -> FocusedTriplePattern<TermPattern> =
             v:Var() { FocusedTriplePattern::new(v) } /
@@ -1995,13 +2126,7 @@ parser! {
             }
         }
 
-        rule TripleTermSubject() -> TermPattern =
-            v:Var() { v.into() } /
-            i:iri() { i.into() } /
-            l:RDFLiteral() { l.into() } /
-            l:NumericLiteral() { l.into() } /
-            l:BooleanLiteral() { l.into() } /
-            b:BlankNode() { b.into() }
+        rule TripleTermSubject() -> TermPattern = TripleTermObject()
 
         rule TripleTermObject() -> TermPattern =
             v:Var() { v.into() } /
@@ -2017,18 +2142,14 @@ parser! {
 
         rule TripleTermData() -> GroundTriple = "<<(" _ s:TripleTermDataSubject() _ p:TripleTermData_p() _ o:TripleTermDataObject() _ ")>>" {?
             Ok(GroundTriple {
-                subject: if let GroundTerm::NamedNode(s) = s { s } else { return Err("Literals are not allowed in subject position of nested patterns") },
+                subject: if let GroundTerm::NamedNode(s) = s { s } else { return Err("Literals or triple terms are not allowed in subject position of nested patterns") },
                 predicate: p,
                 object: o
             })
         }
         rule TripleTermData_p() -> NamedNode = i: iri() { i } / "a" { rdf::TYPE.into() }
 
-        rule TripleTermDataSubject() -> GroundTerm =
-            i:iri() { i.into() } /
-            l:RDFLiteral() { l.into() } /
-            l:NumericLiteral() { l.into() } /
-            l:BooleanLiteral() { l.into() }
+        rule TripleTermDataSubject() -> GroundTerm = TripleTermDataObject()
 
         rule TripleTermDataObject() -> GroundTerm =
             t:TripleTermData() {?
@@ -2099,7 +2220,10 @@ parser! {
             (s, e)
         }
 
-        rule UnaryExpression() -> Expression = s: $("!" / "+" / "-")? _ e:PrimaryExpression() { match s {
+        rule UnaryExpression() -> Expression = s: "!" _ e:UnaryExpression() {?
+            #[cfg(feature = "sparql-12")]{Ok(Expression::Not(Box::new(e)))}
+            #[cfg(not(feature = "sparql-12"))]{Err("Double negation (!!) is only available in SPARQL 1.2")}
+        } / s: $("!" / "+" / "-")? _ e:PrimaryExpression() { match s {
             Some("!") => Expression::Not(Box::new(e)),
             Some("+") => Expression::UnaryPlus(Box::new(e)),
             Some("-") => Expression::UnaryMinus(Box::new(e)),
@@ -2122,12 +2246,7 @@ parser! {
             #[cfg(not(feature = "sparql-12"))]{Err("Triple terms are only available in SPARQL 1.2")}
         }
 
-        rule ExprTripleTermSubject() -> Expression =
-            i:iri() { i.into() } /
-            l:RDFLiteral() { l.into() } /
-            l:NumericLiteral() { l.into() } /
-            l:BooleanLiteral() { l.into() } /
-            v:Var() { v.into() }
+        rule ExprTripleTermSubject() -> Expression = ExprTripleTermObject()
 
         rule ExprTripleTermObject() -> Expression =
             ExprTripleTerm() /
@@ -2471,7 +2590,7 @@ parser! {
 
         rule HEX() = ['0' ..= '9' | 'A' ..= 'F' | 'a' ..= 'f']
 
-        rule PN_LOCAL_ESC() = ['\\'] ['_' | '~' | '.' | '-' | '!' | '$' | '&' | '\'' | '(' | ')' | '*' | '+' | ',' | ';' | '=' | '/' | '?' | '#' | '@' | '%'] //TODO: added '/' to make tests pass but is it valid?
+        rule PN_LOCAL_ESC() = ['\\'] ['_' | '~' | '.' | '-' | '!' | '$' | '&' | '\'' | '(' | ')' | '*' | '+' | ',' | ';' | '=' | '/' | '?' | '#' | '@' | '%']
 
         //space
         rule _() = quiet! { ([' ' | '\t' | '\n' | '\r'] / comment())* }
