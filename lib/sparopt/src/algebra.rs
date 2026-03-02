@@ -1184,16 +1184,57 @@ impl GraphPattern {
                 ],
             },
             AlGraphPattern::Graph { inner, name } => {
-                #[cfg(feature = "sep-0006")]
-                if matches!(inner.as_ref(), AlGraphPattern::Project { .. }) {
-                    return Self::lateral(
-                        Self::Graph {
-                            graph_name: name.clone(),
-                        },
-                        Self::from_sparql_algebra(inner, Some(name), blank_nodes),
+                if let NamedNodePattern::Variable(graph_variable) = name
+                    && contains_left_join(inner)
+                {
+                    let mut inner_pattern =
+                        Self::from_sparql_algebra(inner, Some(name), blank_nodes);
+                    let local_graph_variable = fresh_variable_not_in_pattern(&inner_pattern, &[]);
+                    rename_graph_position_variable(
+                        &mut inner_pattern,
+                        graph_variable,
+                        &local_graph_variable,
                     );
+                    let graph_check = Self::Graph {
+                        graph_name: name.clone(),
+                    };
+                    #[cfg(feature = "sep-0006")]
+                    let graph_join = if matches!(inner.as_ref(), AlGraphPattern::Project { .. }) {
+                        Self::lateral(graph_check, inner_pattern)
+                    } else {
+                        Self::join(graph_check, inner_pattern, JoinAlgorithm::default())
+                    };
+                    #[cfg(not(feature = "sep-0006"))]
+                    let graph_join =
+                        Self::join(graph_check, inner_pattern, JoinAlgorithm::default());
+                    let constrained = Self::filter(
+                        graph_join,
+                        Expression::Equal(
+                            Box::new(Expression::Variable(graph_variable.clone())),
+                            Box::new(Expression::Variable(local_graph_variable.clone())),
+                        ),
+                    );
+                    let mut projected_variables = Vec::new();
+                    constrained.lookup_used_variables(&mut |variable| {
+                        if variable != &local_graph_variable
+                            && !projected_variables.contains(variable)
+                        {
+                            projected_variables.push(variable.clone());
+                        }
+                    });
+                    Self::project(constrained, projected_variables)
+                } else {
+                    #[cfg(feature = "sep-0006")]
+                    if matches!(inner.as_ref(), AlGraphPattern::Project { .. }) {
+                        return Self::lateral(
+                            Self::Graph {
+                                graph_name: name.clone(),
+                            },
+                            Self::from_sparql_algebra(inner, Some(name), blank_nodes),
+                        );
+                    }
+                    Self::from_sparql_algebra(inner, Some(name), blank_nodes)
                 }
-                Self::from_sparql_algebra(inner, Some(name), blank_nodes)
             }
             AlGraphPattern::Extend {
                 inner,
@@ -1709,7 +1750,38 @@ fn new_var() -> Variable {
     Variable::new_unchecked(format!("{:x}", random::<u128>()))
 }
 
-fn fresh_variable_not_in_pattern(pattern: &GraphPattern, projected_variables: &[Variable]) -> Variable {
+fn contains_left_join(pattern: &AlGraphPattern) -> bool {
+    match pattern {
+        AlGraphPattern::LeftJoin { .. } => true,
+        AlGraphPattern::Join { left, right }
+        | AlGraphPattern::Union { left, right }
+        | AlGraphPattern::Minus { left, right } => {
+            contains_left_join(left) || contains_left_join(right)
+        }
+        #[cfg(feature = "sep-0006")]
+        AlGraphPattern::Lateral { left, right } => {
+            contains_left_join(left) || contains_left_join(right)
+        }
+        AlGraphPattern::Graph { inner, .. }
+        | AlGraphPattern::Filter { inner, .. }
+        | AlGraphPattern::Extend { inner, .. }
+        | AlGraphPattern::OrderBy { inner, .. }
+        | AlGraphPattern::Project { inner, .. }
+        | AlGraphPattern::Distinct { inner }
+        | AlGraphPattern::Reduced { inner }
+        | AlGraphPattern::Slice { inner, .. }
+        | AlGraphPattern::Group { inner, .. }
+        | AlGraphPattern::Service { inner, .. } => contains_left_join(inner),
+        AlGraphPattern::Bgp { .. }
+        | AlGraphPattern::Path { .. }
+        | AlGraphPattern::Values { .. } => false,
+    }
+}
+
+fn fresh_variable_not_in_pattern(
+    pattern: &GraphPattern,
+    projected_variables: &[Variable],
+) -> Variable {
     let mut used = HashSet::new();
     pattern.lookup_used_variables(&mut |v| {
         used.insert(v.clone());
@@ -1812,7 +1884,11 @@ fn rename_order_expression_variable(order: &mut OrderExpression, from: &Variable
     }
 }
 
-fn rename_variable_in_non_graph_positions(pattern: &mut GraphPattern, from: &Variable, to: &Variable) {
+fn rename_variable_in_non_graph_positions(
+    pattern: &mut GraphPattern,
+    from: &Variable,
+    to: &Variable,
+) {
     match pattern {
         GraphPattern::QuadPattern {
             subject,
@@ -1918,6 +1994,53 @@ fn rename_variable_in_non_graph_positions(pattern: &mut GraphPattern, from: &Var
             rename_named_node_pattern_variable(name, from, to);
             rename_variable_in_non_graph_positions(inner, from, to);
         }
+    }
+}
+
+fn rename_graph_position_variable(pattern: &mut GraphPattern, from: &Variable, to: &Variable) {
+    match pattern {
+        GraphPattern::QuadPattern { graph_name, .. } | GraphPattern::Path { graph_name, .. } => {
+            if let Some(NamedNodePattern::Variable(variable)) = graph_name
+                && variable == from
+            {
+                *variable = to.clone();
+            }
+        }
+        GraphPattern::Graph { graph_name } => {
+            if let NamedNodePattern::Variable(variable) = graph_name
+                && variable == from
+            {
+                *variable = to.clone();
+            }
+        }
+        GraphPattern::Join { left, right, .. } | GraphPattern::Minus { left, right, .. } => {
+            rename_graph_position_variable(left, from, to);
+            rename_graph_position_variable(right, from, to);
+        }
+        #[cfg(feature = "sep-0006")]
+        GraphPattern::Lateral { left, right } => {
+            rename_graph_position_variable(left, from, to);
+            rename_graph_position_variable(right, from, to);
+        }
+        GraphPattern::LeftJoin { left, right, .. } => {
+            rename_graph_position_variable(left, from, to);
+            rename_graph_position_variable(right, from, to);
+        }
+        GraphPattern::Filter { inner, .. }
+        | GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner }
+        | GraphPattern::Slice { inner, .. }
+        | GraphPattern::Service { inner, .. } => rename_graph_position_variable(inner, from, to),
+        GraphPattern::Union { inner } => {
+            for child in inner {
+                rename_graph_position_variable(child, from, to);
+            }
+        }
+        GraphPattern::Extend { inner, .. }
+        | GraphPattern::Project { inner, .. }
+        | GraphPattern::OrderBy { inner, .. }
+        | GraphPattern::Group { inner, .. } => rename_graph_position_variable(inner, from, to),
+        GraphPattern::Values { .. } => {}
     }
 }
 
