@@ -2233,8 +2233,6 @@ impl<'a, D: QueryableDataset<'a>> ExpressionEvaluatorContext<'a>
 
 #[cfg(feature = "sparql-12")]
 type LanguageWithMaybeBaseDirection = (String, Option<BaseDirection>);
-#[cfg(not(feature = "sparql-12"))]
-type LanguageWithMaybeBaseDirection = String;
 
 #[cfg(feature = "sparql-12")]
 fn to_string_and_language(
@@ -2255,9 +2253,7 @@ fn to_string_and_language(
 }
 
 #[cfg(not(feature = "sparql-12"))]
-fn to_string_and_language(
-    term: ExpressionTerm,
-) -> Option<(String, Option<LanguageWithMaybeBaseDirection>)> {
+fn to_string_and_language(term: ExpressionTerm) -> Option<(String, Option<String>)> {
     match term {
         ExpressionTerm::StringLiteral(value) => Some((value, None)),
         ExpressionTerm::LangStringLiteral { value, language } => Some((value, Some(language))),
@@ -2286,10 +2282,7 @@ fn build_plain_literal(
 }
 
 #[cfg(not(feature = "sparql-12"))]
-fn build_plain_literal(
-    value: String,
-    language: Option<LanguageWithMaybeBaseDirection>,
-) -> ExpressionTerm {
+fn build_plain_literal(value: String, language: Option<String>) -> ExpressionTerm {
     if let Some(language) = language {
         ExpressionTerm::LangStringLiteral { value, language }
     } else {
@@ -2639,10 +2632,9 @@ impl Accumulator for MaxAccumulator {
     }
 }
 
-#[expect(clippy::option_option)]
 struct GroupConcatAccumulator {
     concat: Option<String>,
-    language: Option<Option<LanguageWithMaybeBaseDirection>>,
+    is_continue: bool,
     separator: Rc<str>,
 }
 
@@ -2650,7 +2642,7 @@ impl GroupConcatAccumulator {
     fn new(separator: Rc<str>) -> Self {
         Self {
             concat: Some(String::new()),
-            language: None,
+            is_continue: false,
             separator,
         }
     }
@@ -2661,17 +2653,14 @@ impl Accumulator for GroupConcatAccumulator {
         let Some(concat) = self.concat.as_mut() else {
             return;
         };
-        let Some((value, e_language)) = to_string_and_language(element) else {
+        let Some((value, _)) = to_string_and_language(element) else {
             self.concat = None;
             return;
         };
-        if let Some(lang) = &self.language {
-            if *lang != e_language {
-                self.language = Some(None)
-            }
+        if self.is_continue {
             concat.push_str(&self.separator);
         } else {
-            self.language = Some(e_language)
+            self.is_continue = true;
         }
         concat.push_str(&value);
     }
@@ -2679,7 +2668,7 @@ impl Accumulator for GroupConcatAccumulator {
     fn finish(&mut self) -> Option<ExpressionTerm> {
         self.concat
             .take()
-            .map(|result| build_plain_literal(result, self.language.take().flatten()))
+            .map(|result| build_plain_literal(result, None))
     }
 }
 
