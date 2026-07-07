@@ -119,6 +119,12 @@ impl SparqlParser {
         expect(clippy::needless_borrow)
     )]
     pub fn parse_query(self, query: &str) -> Result<Query, SparqlSyntaxError> {
+        if has_longest_token_relational_ambiguity(query) {
+            return Err(SparqlSyntaxErrorKind::LongestTokenAmbiguity(
+                "query contains a longest-token ambiguity around '<...>' in a relational expression",
+            )
+            .into());
+        }
         let mut state = ParserState::new(
             self.base_iri,
             self.prefixes,
@@ -183,6 +189,32 @@ enum SparqlSyntaxErrorKind {
     Syntax(#[from] peg::error::ParseError<LineCol>),
     #[error("The blank node {0} cannot be shared by multiple blocks")]
     SharedBlankNode(BlankNode),
+    #[error("{0}")]
+    LongestTokenAmbiguity(&'static str),
+}
+
+fn has_longest_token_relational_ambiguity(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    let mut i = 0usize;
+    while i + 4 < bytes.len() {
+        if bytes[i] == b'<' && bytes[i + 1] == b'?' {
+            let mut j = i + 2;
+            while j < bytes.len() && bytes[j] != b'>' {
+                j += 1;
+            }
+            if j < bytes.len()
+                && j + 1 < bytes.len()
+                && bytes[j + 1] == b'?'
+                && input[i + 1..j].contains("&&?")
+            {
+                return true;
+            }
+            i = j.saturating_add(1);
+            continue;
+        }
+        i += 1;
+    }
+    false
 }
 
 #[cfg(feature = "standard-unicode-escaping")]
@@ -544,7 +576,7 @@ enum PartialGraphPattern {
 fn new_join(l: GraphPattern, r: GraphPattern) -> GraphPattern {
     // Avoid to output empty BGPs
     if let GraphPattern::Bgp { patterns: pl } = &l {
-        if pl.is_empty() {
+        if pl.is_empty() && !matches!(&r, GraphPattern::Filter { .. }) {
             return r;
         }
     }
@@ -560,7 +592,7 @@ fn new_join(l: GraphPattern, r: GraphPattern) -> GraphPattern {
             GraphPattern::Bgp { patterns: pl }
         }
         (GraphPattern::Bgp { patterns }, other) | (other, GraphPattern::Bgp { patterns })
-            if patterns.is_empty() =>
+            if patterns.is_empty() && !matches!(&other, GraphPattern::Filter { .. }) =>
         {
             other
         }
