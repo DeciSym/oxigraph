@@ -119,6 +119,12 @@ impl SparqlParser {
         expect(clippy::needless_borrow)
     )]
     pub fn parse_query(self, query: &str) -> Result<Query, SparqlSyntaxError> {
+        if has_longest_token_relational_ambiguity(query) {
+            return Err(SparqlSyntaxErrorKind::LongestTokenAmbiguity(
+                "query contains a longest-token ambiguity around '<...>' in a relational expression",
+            )
+            .into());
+        }
         let mut state = ParserState::new(
             self.base_iri,
             self.prefixes,
@@ -183,6 +189,129 @@ enum SparqlSyntaxErrorKind {
     Syntax(#[from] peg::error::ParseError<LineCol>),
     #[error("The blank node {0} cannot be shared by multiple blocks")]
     SharedBlankNode(BlankNode),
+    #[error("{0}")]
+    LongestTokenAmbiguity(&'static str),
+}
+
+fn has_longest_token_relational_ambiguity(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    let mut i = 0usize;
+    while i + 4 < bytes.len() {
+        if bytes[i] == b'<' && bytes[i + 1] == b'?' {
+            let mut j = i + 2;
+            while j < bytes.len() && bytes[j] != b'>' {
+                j += 1;
+            }
+            if j < bytes.len()
+                && j + 1 < bytes.len()
+                && bytes[j + 1] == b'?'
+                && input[i + 1..j].contains("&&?")
+            {
+                return true;
+            }
+            i = j.saturating_add(1);
+            continue;
+        }
+        i += 1;
+    }
+    false
+}
+
+#[cfg(feature = "standard-unicode-escaping")]
+fn unescape_unicode_codepoints(input: &str) -> Cow<'_, str> {
+    if needs_unescape_unicode_codepoints(input) {
+        UnescapeUnicodeCharIterator::new(input).collect()
+    } else {
+        input.into()
+    }
+}
+
+#[cfg(feature = "standard-unicode-escaping")]
+fn needs_unescape_unicode_codepoints(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    for i in 1..bytes.len() {
+        if (bytes[i] == b'u' || bytes[i] == b'U') && bytes[i - 1] == b'\\' {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(feature = "standard-unicode-escaping")]
+struct UnescapeUnicodeCharIterator<'a> {
+    iter: Chars<'a>,
+    buffer: String,
+}
+
+#[cfg(feature = "standard-unicode-escaping")]
+impl<'a> UnescapeUnicodeCharIterator<'a> {
+    fn new(string: &'a str) -> Self {
+        Self {
+            iter: string.chars(),
+            buffer: String::with_capacity(9),
+        }
+    }
+}
+
+#[cfg(feature = "standard-unicode-escaping")]
+impl<'a> Iterator for UnescapeUnicodeCharIterator<'a> {
+    type Item = char;
+
+    fn next(&mut self) -> Option<char> {
+        let c = if self.buffer.is_empty() {
+            self.iter.next()?
+        } else {
+            self.buffer.remove(0)
+        };
+        match c {
+            '\\' => match self.iter.next() {
+                Some('u') => {
+                    self.buffer.push('u');
+                    for _ in 0..4 {
+                        if let Some(c) = self.iter.next() {
+                            self.buffer.push(c);
+                        } else {
+                            return Some('\\');
+                        }
+                    }
+                    if let Some(c) = u32::from_str_radix(&self.buffer[1..], 16)
+                        .ok()
+                        .and_then(char::from_u32)
+                    {
+                        self.buffer.clear();
+                        Some(c)
+                    } else {
+                        Some('\\')
+                    }
+                }
+                Some('U') => {
+                    self.buffer.push('U');
+                    for _ in 0..8 {
+                        if let Some(c) = self.iter.next() {
+                            self.buffer.push(c);
+                        } else {
+                            return Some('\\');
+                        }
+                    }
+                    if let Some(c) = u32::from_str_radix(&self.buffer[1..], 16)
+                        .ok()
+                        .and_then(char::from_u32)
+                    {
+                        self.buffer.clear();
+                        Some(c)
+                    } else {
+                        Some('\\')
+                    }
+                }
+                Some(c) => {
+                    self.buffer.push(c);
+                    Some('\\')
+                }
+                None => Some('\\'),
+            },
+            _ => Some(c),
+        }
+    }
 }
 
 #[cfg(feature = "standard-unicode-escaping")]
@@ -544,7 +673,7 @@ enum PartialGraphPattern {
 fn new_join(l: GraphPattern, r: GraphPattern) -> GraphPattern {
     // Avoid to output empty BGPs
     if let GraphPattern::Bgp { patterns: pl } = &l {
-        if pl.is_empty() {
+        if pl.is_empty() && !matches!(&r, GraphPattern::Filter { .. }) {
             return r;
         }
     }
@@ -560,7 +689,7 @@ fn new_join(l: GraphPattern, r: GraphPattern) -> GraphPattern {
             GraphPattern::Bgp { patterns: pl }
         }
         (GraphPattern::Bgp { patterns }, other) | (other, GraphPattern::Bgp { patterns })
-            if patterns.is_empty() =>
+            if patterns.is_empty() && !matches!(&other, GraphPattern::Filter { .. }) =>
         {
             other
         }

@@ -443,6 +443,10 @@ impl QueryEvaluator {
                 |t| Some(t.into())
             }
 
+            fn build_externalize_term(&mut self) -> impl Fn(Term) -> Option<Term> + 'a {
+                |t| Some(t)
+            }
+
             fn now(&mut self) -> DateTime {
                 *self.now.get_or_insert_with(DateTime::now)
             }

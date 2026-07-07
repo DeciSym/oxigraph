@@ -54,6 +54,8 @@ pub trait ExpressionEvaluatorContext<'a> {
     fn build_externalize_expression_term(
         &mut self,
     ) -> impl Fn(Self::Term) -> Option<ExpressionTerm> + 'a; // TODO: return result
+    /// DeciSym: externalize to the original term (preserving lexical form) for STR().
+    fn build_externalize_term(&mut self) -> impl Fn(Self::Term) -> Option<Term> + 'a;
     fn now(&mut self) -> DateTime;
     fn base_iri(&mut self) -> Option<Arc<Iri<String>>>;
     fn custom_functions(&mut self) -> &CustomFunctionRegistry;
@@ -465,16 +467,34 @@ pub fn build_expression_evaluator<'a, C: ExpressionEvaluatorContext<'a>>(
         }
         Expression::FunctionCall(function, parameters) => match function {
             Function::Str => {
-                let e = build_expression_evaluator(&parameters[0], context)?;
-                Rc::new(move |tuple| {
-                    Some(ExpressionTerm::StringLiteral(match e(tuple)?.into() {
-                        Term::NamedNode(term) => term.into_string(),
-                        Term::BlankNode(_) => return None,
-                        Term::Literal(term) => term.destruct().0,
-                        #[cfg(feature = "sparql-12")]
-                        Term::Triple(_) => return None,
-                    }))
-                })
+                if let Some(Expression::Variable(variable)) = parameters.first() {
+                    // DeciSym (W3C: str-1, str-2): STR() on a direct term must keep the
+                    // original lexical form, not the canonicalized value.
+                    let lookup = context.build_variable_lookup(variable);
+                    let externalize_term = context.build_externalize_term();
+                    Rc::new(move |tuple| {
+                        Some(ExpressionTerm::StringLiteral(
+                            match externalize_term(lookup(tuple)?)? {
+                                Term::NamedNode(term) => term.into_string(),
+                                Term::BlankNode(_) => return None,
+                                Term::Literal(term) => term.destruct().0,
+                                #[cfg(feature = "sparql-12")]
+                                Term::Triple(_) => return None,
+                            },
+                        ))
+                    })
+                } else {
+                    let e = build_expression_evaluator(&parameters[0], context)?;
+                    Rc::new(move |tuple| {
+                        Some(ExpressionTerm::StringLiteral(match e(tuple)?.into() {
+                            Term::NamedNode(term) => term.into_string(),
+                            Term::BlankNode(_) => return None,
+                            Term::Literal(term) => term.destruct().0,
+                            #[cfg(feature = "sparql-12")]
+                            Term::Triple(_) => return None,
+                        }))
+                    })
+                }
             }
             Function::Lang => {
                 let e = build_expression_evaluator(&parameters[0], context)?;
@@ -1865,73 +1885,108 @@ fn equals(a: &ExpressionTerm, b: &ExpressionTerm) -> Option<bool> {
             _ => Some(false),
         },
         ExpressionTerm::DateTimeLiteral(a) => match b {
-            ExpressionTerm::DateTimeLiteral(b) => Some(a == b),
+            // DeciSym: value comparison (timezone-aware) for temporal equality (W3C: date-2)
+            ExpressionTerm::DateTimeLiteral(b) => {
+                a.partial_cmp(b).map(|ordering| ordering == Ordering::Equal)
+            }
             ExpressionTerm::OtherTypedLiteral { .. } => None,
             _ => Some(false),
         },
         #[cfg(feature = "sep-0002")]
         ExpressionTerm::TimeLiteral(a) => match b {
-            ExpressionTerm::TimeLiteral(b) => Some(a == b),
+            ExpressionTerm::TimeLiteral(b) => {
+                a.partial_cmp(b).map(|ordering| ordering == Ordering::Equal)
+            }
             ExpressionTerm::OtherTypedLiteral { .. } => None,
             _ => Some(false),
         },
         #[cfg(feature = "sep-0002")]
         ExpressionTerm::DateLiteral(a) => match b {
-            ExpressionTerm::DateLiteral(b) => Some(a == b),
+            ExpressionTerm::DateLiteral(b) => {
+                a.partial_cmp(b).map(|ordering| ordering == Ordering::Equal)
+            }
             ExpressionTerm::OtherTypedLiteral { .. } => None,
             _ => Some(false),
         },
         #[cfg(feature = "calendar-ext")]
         ExpressionTerm::GYearMonthLiteral(a) => match b {
-            ExpressionTerm::GYearMonthLiteral(b) => Some(a == b),
+            ExpressionTerm::GYearMonthLiteral(b) => {
+                a.partial_cmp(b).map(|ordering| ordering == Ordering::Equal)
+            }
             ExpressionTerm::OtherTypedLiteral { .. } => None,
             _ => Some(false),
         },
         #[cfg(feature = "calendar-ext")]
         ExpressionTerm::GYearLiteral(a) => match b {
-            ExpressionTerm::GYearLiteral(b) => Some(a == b),
+            ExpressionTerm::GYearLiteral(b) => {
+                a.partial_cmp(b).map(|ordering| ordering == Ordering::Equal)
+            }
             ExpressionTerm::OtherTypedLiteral { .. } => None,
             _ => Some(false),
         },
         #[cfg(feature = "calendar-ext")]
         ExpressionTerm::GMonthDayLiteral(a) => match b {
-            ExpressionTerm::GMonthDayLiteral(b) => Some(a == b),
+            ExpressionTerm::GMonthDayLiteral(b) => {
+                a.partial_cmp(b).map(|ordering| ordering == Ordering::Equal)
+            }
             ExpressionTerm::OtherTypedLiteral { .. } => None,
             _ => Some(false),
         },
         #[cfg(feature = "calendar-ext")]
         ExpressionTerm::GDayLiteral(a) => match b {
-            ExpressionTerm::GDayLiteral(b) => Some(a == b),
+            ExpressionTerm::GDayLiteral(b) => {
+                a.partial_cmp(b).map(|ordering| ordering == Ordering::Equal)
+            }
             ExpressionTerm::OtherTypedLiteral { .. } => None,
             _ => Some(false),
         },
         #[cfg(feature = "calendar-ext")]
         ExpressionTerm::GMonthLiteral(a) => match b {
-            ExpressionTerm::GMonthLiteral(b) => Some(a == b),
+            ExpressionTerm::GMonthLiteral(b) => {
+                a.partial_cmp(b).map(|ordering| ordering == Ordering::Equal)
+            }
             ExpressionTerm::OtherTypedLiteral { .. } => None,
             _ => Some(false),
         },
         #[cfg(feature = "sep-0002")]
         ExpressionTerm::DurationLiteral(a) => match b {
-            ExpressionTerm::DurationLiteral(b) => Some(a == b),
-            ExpressionTerm::YearMonthDurationLiteral(b) => Some(a == b),
-            ExpressionTerm::DayTimeDurationLiteral(b) => Some(a == b),
+            ExpressionTerm::DurationLiteral(b) => {
+                a.partial_cmp(b).map(|ordering| ordering == Ordering::Equal)
+            }
+            ExpressionTerm::YearMonthDurationLiteral(b) => {
+                a.partial_cmp(b).map(|ordering| ordering == Ordering::Equal)
+            }
+            ExpressionTerm::DayTimeDurationLiteral(b) => {
+                a.partial_cmp(b).map(|ordering| ordering == Ordering::Equal)
+            }
             ExpressionTerm::OtherTypedLiteral { .. } => None,
             _ => Some(false),
         },
         #[cfg(feature = "sep-0002")]
         ExpressionTerm::YearMonthDurationLiteral(a) => match b {
-            ExpressionTerm::DurationLiteral(b) => Some(a == b),
-            ExpressionTerm::YearMonthDurationLiteral(b) => Some(a == b),
-            ExpressionTerm::DayTimeDurationLiteral(b) => Some(a == b),
+            ExpressionTerm::DurationLiteral(b) => {
+                a.partial_cmp(b).map(|ordering| ordering == Ordering::Equal)
+            }
+            ExpressionTerm::YearMonthDurationLiteral(b) => {
+                a.partial_cmp(b).map(|ordering| ordering == Ordering::Equal)
+            }
+            ExpressionTerm::DayTimeDurationLiteral(b) => {
+                a.partial_cmp(b).map(|ordering| ordering == Ordering::Equal)
+            }
             ExpressionTerm::OtherTypedLiteral { .. } => None,
             _ => Some(false),
         },
         #[cfg(feature = "sep-0002")]
         ExpressionTerm::DayTimeDurationLiteral(a) => match b {
-            ExpressionTerm::DurationLiteral(b) => Some(a == b),
-            ExpressionTerm::YearMonthDurationLiteral(b) => Some(a == b),
-            ExpressionTerm::DayTimeDurationLiteral(b) => Some(a == b),
+            ExpressionTerm::DurationLiteral(b) => {
+                a.partial_cmp(b).map(|ordering| ordering == Ordering::Equal)
+            }
+            ExpressionTerm::YearMonthDurationLiteral(b) => {
+                a.partial_cmp(b).map(|ordering| ordering == Ordering::Equal)
+            }
+            ExpressionTerm::DayTimeDurationLiteral(b) => {
+                a.partial_cmp(b).map(|ordering| ordering == Ordering::Equal)
+            }
             ExpressionTerm::OtherTypedLiteral { .. } => None,
             _ => Some(false),
         },
