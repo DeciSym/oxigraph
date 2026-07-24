@@ -35,13 +35,19 @@ use std::hash::{Hash, Hasher};
 use std::iter::{Peekable, empty, once};
 use std::marker::PhantomData;
 use std::rc::Rc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, atomic};
 use std::{fmt, io};
 // TODO: make expression raise error when relevant (storage I/O)
 
 type InternalTupleEvaluator<'a, T> =
     Rc<dyn Fn(InternalTuple<T>) -> InternalTuplesIterator<'a, T> + 'a>;
+
+static NEXT_SOLUTION_MAPPING_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_solution_mapping_id() -> u64 {
+    NEXT_SOLUTION_MAPPING_ID.fetch_add(1, atomic::Ordering::Relaxed)
+}
 
 /// Wrapper on top of [`QueryableDataset`]
 struct EvalDataset<'a, D: QueryableDataset<'a>> {
@@ -306,12 +312,14 @@ struct EncodedDatasetSpec<T> {
 
 pub struct InternalTuple<T> {
     inner: Vec<Option<T>>,
+    solution_mapping_id: u64,
 }
 
 impl<T> InternalTuple<T> {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             inner: Vec::with_capacity(capacity),
+            solution_mapping_id: next_solution_mapping_id(),
         }
     }
 
@@ -325,6 +333,10 @@ impl<T> InternalTuple<T> {
 
     pub fn get(&self, index: usize) -> Option<&T> {
         self.inner.get(index).unwrap_or(&None).as_ref()
+    }
+
+    pub fn solution_mapping_id(&self) -> u64 {
+        self.solution_mapping_id
     }
 }
 
@@ -357,7 +369,10 @@ impl<T: Clone + Eq> InternalTuple<T> {
                     }
                 }
             }
-            Some(Self { inner: result })
+            Some(Self {
+                inner: result,
+                solution_mapping_id: next_solution_mapping_id(),
+            })
         } else {
             let mut result = self.inner.clone();
             for (key, other_value) in other.inner.iter().enumerate() {
@@ -372,7 +387,10 @@ impl<T: Clone + Eq> InternalTuple<T> {
                     }
                 }
             }
-            Some(Self { inner: result })
+            Some(Self {
+                inner: result,
+                solution_mapping_id: next_solution_mapping_id(),
+            })
         }
     }
 }
@@ -381,6 +399,7 @@ impl<T: Clone> Clone for InternalTuple<T> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
+            solution_mapping_id: next_solution_mapping_id(),
         }
     }
 }
@@ -2193,6 +2212,12 @@ impl<'a, D: QueryableDataset<'a>> ExpressionEvaluatorContext<'a>
         move |t| dataset.externalize_term(t).ok()
     }
 
+    fn build_solution_mapping_id(
+        &mut self,
+    ) -> impl Fn(&InternalTuple<D::InternalTerm>) -> u64 + 'a {
+        |tuple| tuple.solution_mapping_id()
+    }
+
     fn now(&mut self) -> DateTime {
         self.evaluator.now
     }
@@ -3012,7 +3037,7 @@ impl<'a, D: QueryableDataset<'a>> PathEvaluator<'a, D> {
             }
             PropertyPath::ZeroOrMore(p) => {
                 if start == end {
-                    self.is_subject_or_object_in_graph(start, graph_name)?
+                    true
                 } else {
                     look_in_transitive_closure(
                         self.eval_from_in_graph(p, start, graph_name),
@@ -3028,7 +3053,7 @@ impl<'a, D: QueryableDataset<'a>> PathEvaluator<'a, D> {
             )?,
             PropertyPath::ZeroOrOne(p) => {
                 if start == end {
-                    self.is_subject_or_object_in_graph(start, graph_name)
+                    Ok(true)
                 } else {
                     self.eval_closed_in_graph(p, start, end, graph_name)
                 }?
@@ -3178,14 +3203,12 @@ impl<'a, D: QueryableDataset<'a>> PathEvaluator<'a, D> {
                     .chain(self.eval_from_in_graph(b, start, graph_name)),
             )),
             PropertyPath::ZeroOrMore(p) => {
-                self.run_if_term_is_a_graph_node(start, graph_name, || {
-                    let eval = self.clone();
-                    let p = Rc::clone(p);
-                    let graph_name2 = graph_name.cloned();
-                    transitive_closure(Some(Ok(start.clone())), move |e| {
-                        eval.eval_from_in_graph(&p, &e, graph_name2.as_ref())
-                    })
-                })
+                let eval = self.clone();
+                let p = Rc::clone(p);
+                let graph_name2 = graph_name.cloned();
+                Box::new(transitive_closure(Some(Ok(start.clone())), move |e| {
+                    eval.eval_from_in_graph(&p, &e, graph_name2.as_ref())
+                }))
             }
             PropertyPath::OneOrMore(p) => {
                 let eval = self.clone();
@@ -3197,12 +3220,9 @@ impl<'a, D: QueryableDataset<'a>> PathEvaluator<'a, D> {
                 ))
             }
             PropertyPath::ZeroOrOne(p) => {
-                self.run_if_term_is_a_graph_node(start, graph_name, || {
-                    hash_deduplicate(
-                        once(Ok(start.clone()))
-                            .chain(self.eval_from_in_graph(p, start, graph_name)),
-                    )
-                })
+                Box::new(hash_deduplicate(
+                    once(Ok(start.clone())).chain(self.eval_from_in_graph(p, start, graph_name)),
+                ))
             }
             PropertyPath::NegatedPropertySet(ps) => {
                 let ps = Rc::clone(ps);
@@ -3344,14 +3364,12 @@ impl<'a, D: QueryableDataset<'a>> PathEvaluator<'a, D> {
                     .chain(self.eval_to_in_graph(b, end, graph_name)),
             )),
             PropertyPath::ZeroOrMore(p) => {
-                self.run_if_term_is_a_graph_node(end, graph_name, || {
-                    let eval = self.clone();
-                    let p = Rc::clone(p);
-                    let graph_name2 = graph_name.cloned();
-                    transitive_closure(Some(Ok(end.clone())), move |e| {
-                        eval.eval_to_in_graph(&p, &e, graph_name2.as_ref())
-                    })
-                })
+                let eval = self.clone();
+                let p = Rc::clone(p);
+                let graph_name2 = graph_name.cloned();
+                Box::new(transitive_closure(Some(Ok(end.clone())), move |e| {
+                    eval.eval_to_in_graph(&p, &e, graph_name2.as_ref())
+                }))
             }
             PropertyPath::OneOrMore(p) => {
                 let eval = self.clone();
@@ -3362,11 +3380,9 @@ impl<'a, D: QueryableDataset<'a>> PathEvaluator<'a, D> {
                     move |e| eval.eval_to_in_graph(&p, &e, graph_name2.as_ref()),
                 ))
             }
-            PropertyPath::ZeroOrOne(p) => self.run_if_term_is_a_graph_node(end, graph_name, || {
-                hash_deduplicate(
-                    once(Ok(end.clone())).chain(self.eval_to_in_graph(p, end, graph_name)),
-                )
-            }),
+            PropertyPath::ZeroOrOne(p) => Box::new(hash_deduplicate(
+                once(Ok(end.clone())).chain(self.eval_to_in_graph(p, end, graph_name)),
+            )),
             PropertyPath::NegatedPropertySet(ps) => {
                 let ps = Rc::clone(ps);
                 Box::new(
@@ -3676,43 +3692,6 @@ impl<'a, D: QueryableDataset<'a>> PathEvaluator<'a, D> {
                     Ok((t.object.clone(), t.object, t.graph_name)),
                 ]
             })
-    }
-
-    fn run_if_term_is_a_graph_node<
-        T: 'a,
-        I: Iterator<Item = Result<T, QueryEvaluationError>> + 'a,
-    >(
-        &self,
-        term: &D::InternalTerm,
-        graph_name: Option<&D::InternalTerm>,
-        f: impl FnOnce() -> I,
-    ) -> Box<dyn Iterator<Item = Result<T, QueryEvaluationError>> + 'a> {
-        match self.is_subject_or_object_in_graph(term, graph_name) {
-            Ok(true) => Box::new(f()),
-            Ok(false) => {
-                Box::new(empty()) // Not in the database
-            }
-            Err(error) => Box::new(once(Err(error))),
-        }
-    }
-
-    fn is_subject_or_object_in_graph(
-        &self,
-        term: &D::InternalTerm,
-        graph_name: Option<&D::InternalTerm>,
-    ) -> Result<bool, QueryEvaluationError> {
-        Ok(self
-            .dataset
-            .internal_quads_for_pattern(Some(term), None, None, Some(graph_name))
-            .next()
-            .transpose()?
-            .is_some()
-            || self
-                .dataset
-                .internal_quads_for_pattern(None, None, Some(term), Some(graph_name))
-                .next()
-                .transpose()?
-                .is_some())
     }
 
     fn run_if_term_is_a_dataset_node<
