@@ -18,9 +18,9 @@ sep-0002 = ["spargebra/sep-0002"]
 sep-0006 = ["spargebra/sep-0006"]
 
 [dependencies]
-oxrdf.workspace = true
+oxrdf = "=0.3.3"
 rand.workspace = true
-spargebra.workspace = true
+spargebra = "=0.4.6"
 
 [lints]
 workspace = true

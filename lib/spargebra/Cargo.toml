@@ -22,7 +22,7 @@ standard-unicode-escaping = [
 [dependencies]
 oxilangtag.workspace = true
 oxiri.workspace = true
-oxrdf.workspace = true
+oxrdf = "=0.3.3"
 peg.workspace = true
 rand.workspace = true
 thiserror.workspace = true
