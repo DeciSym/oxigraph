@@ -26,16 +26,16 @@ hex.workspace = true
 json-event-parser.workspace = true
 md-5.workspace = true
 oxiri.workspace = true
-oxrdf = { workspace = true, features = ["oxsdatatypes"] }
-oxsdatatypes.workspace = true
+oxrdf = { version = "=0.3.4", features = ["oxsdatatypes"] }
+oxsdatatypes = "=0.2.3"
 rand.workspace = true
 regex.workspace = true
 rustc-hash.workspace = true
 sha1.workspace = true
 sha2.workspace = true
-spargebra.workspace = true
-sparopt.workspace = true
-sparesults.workspace = true
+spargebra = "=0.4.7"
+sparopt = "=0.3.7"
+sparesults = "=0.3.4"
 thiserror.workspace = true
 
 [lints]
