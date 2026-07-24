@@ -447,6 +447,12 @@ impl QueryEvaluator {
                 |t| Some(t)
             }
 
+            fn build_solution_mapping_id(
+                &mut self,
+            ) -> impl Fn(&HashMap<&'a Variable, Term>) -> u64 + 'a {
+                |tuple| std::ptr::from_ref(tuple) as usize as u64
+            }
+
             fn now(&mut self) -> DateTime {
                 *self.now.get_or_insert_with(DateTime::now)
             }

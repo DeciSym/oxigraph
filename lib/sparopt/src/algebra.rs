@@ -1187,10 +1187,6 @@ impl GraphPattern {
                 if let NamedNodePattern::Variable(graph_variable) = name
                     && contains_left_join(inner)
                 {
-                    // DeciSym (41f06ccc): scope a GRAPH ?g variable that is reused inside
-                    // a nested OPTIONAL. Rename the graph-position ?g to a fresh local
-                    // variable, then constrain it equal to the outer ?g so the reused
-                    // occurrence cannot silently rebind.
                     let mut inner_pattern =
                         Self::from_sparql_algebra(inner, Some(name), blank_nodes);
                     let local_graph_variable = fresh_variable_not_in_pattern(&inner_pattern, &[]);
@@ -1228,6 +1224,15 @@ impl GraphPattern {
                     });
                     Self::project(constrained, projected_variables)
                 } else {
+                    #[cfg(feature = "sep-0006")]
+                    if matches!(inner.as_ref(), AlGraphPattern::Project { .. }) {
+                        return Self::lateral(
+                            Self::Graph {
+                                graph_name: name.clone(),
+                            },
+                            Self::from_sparql_algebra(inner, Some(name), blank_nodes),
+                        );
+                    }
                     Self::from_sparql_algebra(inner, Some(name), blank_nodes)
                 }
             }
@@ -1241,17 +1246,56 @@ impl GraphPattern {
                 variable: variable.clone(),
             },
             AlGraphPattern::Minus { left, right } => Self::Minus {
-                left: Box::new(Self::from_sparql_algebra(left, graph_name, blank_nodes)),
-                right: Box::new(Self::from_sparql_algebra(right, graph_name, blank_nodes)),
+                left: Box::new({
+                    let left = Self::from_sparql_algebra(left, graph_name, blank_nodes);
+                    if let Some(NamedNodePattern::Variable(graph_variable)) = graph_name {
+                        let mut variables = Vec::new();
+                        left.lookup_used_variables(&mut |variable| {
+                            if variable != graph_variable && !variables.contains(variable) {
+                                variables.push(variable.clone());
+                            }
+                        });
+                        Self::project(left, variables)
+                    } else {
+                        left
+                    }
+                }),
+                right: Box::new({
+                    let right = Self::from_sparql_algebra(right, graph_name, blank_nodes);
+                    if let Some(NamedNodePattern::Variable(graph_variable)) = graph_name {
+                        let mut variables = Vec::new();
+                        right.lookup_used_variables(&mut |variable| {
+                            if variable != graph_variable && !variables.contains(variable) {
+                                variables.push(variable.clone());
+                            }
+                        });
+                        Self::project(right, variables)
+                    } else {
+                        right
+                    }
+                }),
                 algorithm: MinusAlgorithm::default(),
             },
             AlGraphPattern::Values {
                 variables,
                 bindings,
-            } => Self::Values {
-                variables: variables.clone(),
-                bindings: bindings.clone(),
-            },
+            } => {
+                let values = Self::Values {
+                    variables: variables.clone(),
+                    bindings: bindings.clone(),
+                };
+                if let Some(graph_name) = graph_name {
+                    Self::join(
+                        Self::Graph {
+                            graph_name: graph_name.clone(),
+                        },
+                        values,
+                        JoinAlgorithm::default(),
+                    )
+                } else {
+                    values
+                }
+            }
             AlGraphPattern::OrderBy { inner, expression } => {
                 let mut inner = Self::from_sparql_algebra(inner, graph_name, blank_nodes);
                 let mut expressions = Vec::with_capacity(expression.len());
@@ -1279,24 +1323,23 @@ impl GraphPattern {
                 }
             }
             AlGraphPattern::Project { inner, variables } => {
-                let graph_name = if let Some(NamedNodePattern::Variable(graph_name)) = graph_name {
-                    Some(NamedNodePattern::Variable(
-                        if variables.contains(graph_name) {
-                            graph_name.clone()
-                        } else {
-                            new_var()
-                        },
-                    ))
-                } else {
-                    graph_name.cloned()
-                };
+                let mut projected_variables = variables.clone();
+                let mut inner = Self::from_sparql_algebra(inner, graph_name, &mut HashMap::new());
+                if let Some(NamedNodePattern::Variable(graph_variable)) = graph_name {
+                    if !projected_variables.contains(graph_variable) {
+                        let local_graph_variable =
+                            fresh_variable_not_in_pattern(&inner, &projected_variables);
+                        rename_variable_in_non_graph_positions(
+                            &mut inner,
+                            graph_variable,
+                            &local_graph_variable,
+                        );
+                        projected_variables.push(graph_variable.clone());
+                    }
+                }
                 Self::Project {
-                    inner: Box::new(Self::from_sparql_algebra(
-                        inner,
-                        graph_name.as_ref(),
-                        &mut HashMap::new(),
-                    )),
-                    variables: variables.clone(),
+                    inner: Box::new(inner),
+                    variables: projected_variables,
                 }
             }
             AlGraphPattern::Distinct { inner } => Self::Distinct {
@@ -1707,9 +1750,6 @@ fn new_var() -> Variable {
     Variable::new_unchecked(format!("{:x}", random::<u128>()))
 }
 
-// DeciSym graph-scope helpers (41f06ccc + supporting util from b3e10a39).
-// Only these three are carried; the other b3e10a39 sparopt changes (which caused the
-// values_and_path / push_filter regressions) are intentionally left out.
 fn contains_left_join(pattern: &AlGraphPattern) -> bool {
     match pattern {
         AlGraphPattern::LeftJoin { .. } => true,
@@ -1751,6 +1791,208 @@ fn fresh_variable_not_in_pattern(
         let candidate = new_var();
         if !used.contains(&candidate) {
             return candidate;
+        }
+    }
+}
+
+fn rename_named_node_pattern_variable(
+    pattern: &mut NamedNodePattern,
+    from: &Variable,
+    to: &Variable,
+) {
+    if let NamedNodePattern::Variable(variable) = pattern {
+        if variable == from {
+            *variable = to.clone();
+        }
+    }
+}
+
+fn rename_ground_term_pattern_variable(
+    pattern: &mut GroundTermPattern,
+    from: &Variable,
+    to: &Variable,
+) {
+    if let GroundTermPattern::Variable(variable) = pattern {
+        if variable == from {
+            *variable = to.clone();
+        }
+    }
+    #[cfg(feature = "sparql-12")]
+    if let GroundTermPattern::Triple(triple) = pattern {
+        rename_ground_term_pattern_variable(&mut triple.subject, from, to);
+        rename_named_node_pattern_variable(&mut triple.predicate, from, to);
+        rename_ground_term_pattern_variable(&mut triple.object, from, to);
+    }
+}
+
+fn rename_expression_variable(expression: &mut Expression, from: &Variable, to: &Variable) {
+    match expression {
+        Expression::NamedNode(_) | Expression::Literal(_) => {}
+        Expression::Variable(variable) | Expression::Bound(variable) => {
+            if variable == from {
+                *variable = to.clone();
+            }
+        }
+        Expression::Or(inner)
+        | Expression::And(inner)
+        | Expression::Coalesce(inner)
+        | Expression::FunctionCall(_, inner) => {
+            for child in inner {
+                rename_expression_variable(child, from, to);
+            }
+        }
+        Expression::Equal(left, right)
+        | Expression::SameTerm(left, right)
+        | Expression::Greater(left, right)
+        | Expression::GreaterOrEqual(left, right)
+        | Expression::Less(left, right)
+        | Expression::LessOrEqual(left, right)
+        | Expression::Add(left, right)
+        | Expression::Subtract(left, right)
+        | Expression::Multiply(left, right)
+        | Expression::Divide(left, right) => {
+            rename_expression_variable(left, from, to);
+            rename_expression_variable(right, from, to);
+        }
+        Expression::UnaryPlus(inner) | Expression::UnaryMinus(inner) | Expression::Not(inner) => {
+            rename_expression_variable(inner, from, to)
+        }
+        Expression::Exists(pattern) => rename_variable_in_non_graph_positions(pattern, from, to),
+        Expression::If(cond, then_branch, else_branch) => {
+            rename_expression_variable(cond, from, to);
+            rename_expression_variable(then_branch, from, to);
+            rename_expression_variable(else_branch, from, to);
+        }
+    }
+}
+
+fn rename_aggregate_expression_variable(
+    aggregate: &mut AggregateExpression,
+    from: &Variable,
+    to: &Variable,
+) {
+    if let AggregateExpression::FunctionCall { expr, .. } = aggregate {
+        rename_expression_variable(expr, from, to);
+    }
+}
+
+fn rename_order_expression_variable(order: &mut OrderExpression, from: &Variable, to: &Variable) {
+    match order {
+        OrderExpression::Asc(expression) | OrderExpression::Desc(expression) => {
+            rename_expression_variable(expression, from, to);
+        }
+    }
+}
+
+fn rename_variable_in_non_graph_positions(
+    pattern: &mut GraphPattern,
+    from: &Variable,
+    to: &Variable,
+) {
+    match pattern {
+        GraphPattern::QuadPattern {
+            subject,
+            predicate,
+            object,
+            ..
+        } => {
+            rename_ground_term_pattern_variable(subject, from, to);
+            rename_named_node_pattern_variable(predicate, from, to);
+            rename_ground_term_pattern_variable(object, from, to);
+        }
+        GraphPattern::Path {
+            subject, object, ..
+        } => {
+            rename_ground_term_pattern_variable(subject, from, to);
+            rename_ground_term_pattern_variable(object, from, to);
+        }
+        GraphPattern::Graph { .. } => {}
+        GraphPattern::Join { left, right, .. } | GraphPattern::Minus { left, right, .. } => {
+            rename_variable_in_non_graph_positions(left, from, to);
+            rename_variable_in_non_graph_positions(right, from, to);
+        }
+        #[cfg(feature = "sep-0006")]
+        GraphPattern::Lateral { left, right } => {
+            rename_variable_in_non_graph_positions(left, from, to);
+            rename_variable_in_non_graph_positions(right, from, to);
+        }
+        GraphPattern::LeftJoin {
+            left,
+            right,
+            expression,
+            ..
+        } => {
+            rename_variable_in_non_graph_positions(left, from, to);
+            rename_variable_in_non_graph_positions(right, from, to);
+            rename_expression_variable(expression, from, to);
+        }
+        GraphPattern::Filter { expression, inner } => {
+            rename_expression_variable(expression, from, to);
+            rename_variable_in_non_graph_positions(inner, from, to);
+        }
+        GraphPattern::Union { inner } => {
+            for child in inner {
+                rename_variable_in_non_graph_positions(child, from, to);
+            }
+        }
+        GraphPattern::Extend {
+            inner,
+            variable,
+            expression,
+        } => {
+            rename_variable_in_non_graph_positions(inner, from, to);
+            if variable == from {
+                *variable = to.clone();
+            }
+            rename_expression_variable(expression, from, to);
+        }
+        GraphPattern::Values { variables, .. } => {
+            for variable in variables {
+                if variable == from {
+                    *variable = to.clone();
+                }
+            }
+        }
+        GraphPattern::Project { inner, variables } => {
+            for variable in variables {
+                if variable == from {
+                    *variable = to.clone();
+                }
+            }
+            rename_variable_in_non_graph_positions(inner, from, to);
+        }
+        GraphPattern::OrderBy { inner, expression } => {
+            rename_variable_in_non_graph_positions(inner, from, to);
+            for order in expression {
+                rename_order_expression_variable(order, from, to);
+            }
+        }
+        GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner }
+        | GraphPattern::Slice { inner, .. } => {
+            rename_variable_in_non_graph_positions(inner, from, to);
+        }
+        GraphPattern::Group {
+            inner,
+            variables,
+            aggregates,
+        } => {
+            rename_variable_in_non_graph_positions(inner, from, to);
+            for variable in variables {
+                if variable == from {
+                    *variable = to.clone();
+                }
+            }
+            for (variable, aggregate) in aggregates {
+                if variable == from {
+                    *variable = to.clone();
+                }
+                rename_aggregate_expression_variable(aggregate, from, to);
+            }
+        }
+        GraphPattern::Service { name, inner, .. } => {
+            rename_named_node_pattern_variable(name, from, to);
+            rename_variable_in_non_graph_positions(inner, from, to);
         }
     }
 }
