@@ -19,6 +19,7 @@ use sparopt::algebra::{Expression, GraphPattern};
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::ops::RangeInclusive;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -56,6 +57,7 @@ pub trait ExpressionEvaluatorContext<'a> {
     ) -> impl Fn(Self::Term) -> Option<ExpressionTerm> + 'a; // TODO: return result
     /// DeciSym: externalize to the original term (preserving lexical form) for STR().
     fn build_externalize_term(&mut self) -> impl Fn(Self::Term) -> Option<Term> + 'a;
+    fn build_solution_mapping_id(&mut self) -> impl Fn(&Self::Tuple) -> u64 + 'a;
     fn now(&mut self) -> DateTime;
     fn base_iri(&mut self) -> Option<Arc<Iri<String>>>;
     fn custom_functions(&mut self) -> &CustomFunctionRegistry;
@@ -626,11 +628,19 @@ pub fn build_expression_evaluator<'a, C: ExpressionEvaluatorContext<'a>>(
             Function::BNode => match parameters.first() {
                 Some(id) => {
                     let id = build_expression_evaluator(id, context)?;
+                    let solution_mapping_id = context.build_solution_mapping_id();
                     Rc::new(move |tuple| {
                         let ExpressionTerm::StringLiteral(id) = id(tuple)? else {
                             return None;
                         };
-                        Some(ExpressionTerm::BlankNode(BlankNode::new(id).ok()?))
+                        // W3C: BNODE(str) (sparql11/functions/manifest.ttl, :bnode01)
+                        // same lexical within one solution mapping => same bnode
+                        let mapping_id = solution_mapping_id(tuple);
+                        let mut label = format!("b{mapping_id}_");
+                        for byte in id.as_bytes() {
+                            write!(&mut label, "{byte:02x}").ok()?;
+                        }
+                        Some(ExpressionTerm::BlankNode(BlankNode::new(label).ok()?))
                     })
                 }
                 None => Rc::new(|_| Some(ExpressionTerm::BlankNode(BlankNode::default()))),
