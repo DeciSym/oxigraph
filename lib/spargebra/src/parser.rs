@@ -195,7 +195,7 @@ enum SparqlSyntaxErrorKind {
 
 fn has_longest_token_relational_ambiguity(input: &str) -> bool {
     let bytes = input.as_bytes();
-    let mut i = 0usize;
+    let mut i = 0_usize;
     while i + 4 < bytes.len() {
         if bytes[i] == b'<' && bytes[i + 1] == b'?' {
             let mut j = i + 2;
