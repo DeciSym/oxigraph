@@ -329,3 +329,15 @@ panic = "abort"
 
 [profile.release.package.oxigraph-js]
 opt-level = "z"
+
+# The commit that pins these crates' oxigraph deps to crates.io "=X.Y.Z" versions (for
+# downstream git-patch consumers) also makes this workspace resolve them from crates.io,
+# so a plain `cargo test`/`cargo clippy` here would silently check the *published* crates
+# instead of the patched sources. Point them back at the in-tree copies. Cargo ignores
+# `[patch]` in a dependency, so this has no effect on consumers such as `de`.
+[patch.crates-io]
+spargebra = { path = "lib/spargebra" }
+sparopt = { path = "lib/sparopt" }
+sparesults = { path = "lib/sparesults" }
+spareval = { path = "lib/spareval" }
+oxrdfxml = { path = "lib/oxrdfxml" }
