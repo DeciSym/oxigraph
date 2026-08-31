@@ -883,6 +883,13 @@ impl<'a, D: QueryableDataset<'a>> SimpleEvaluator<'a, D> {
                     };
                     let path_eval = PathEvaluator {
                         dataset: dataset.clone(),
+                        zero_length_restricted_to_graph_nodes: matches!(
+                            subject_selector,
+                            TupleSelector::Variable(_)
+                        ) && matches!(
+                            object_selector,
+                            TupleSelector::Variable(_)
+                        ),
                     };
                     let input_object = match object_selector.get_pattern_value(
                         &from,
@@ -3021,6 +3028,14 @@ pub enum PropertyPath<T> {
 
 struct PathEvaluator<'a, D: QueryableDataset<'a>> {
     dataset: EvalDataset<'a, D>,
+    /// Whether a zero-length path match may only bind terms that are nodes of the graph.
+    ///
+    /// SPARQL 1.1 restricts the zero-length match of `ZeroOrOnePath`/`ZeroOrMorePath` to
+    /// `subjects(G) ∪ objects(G)` only when *both* ends of the path are variables. When
+    /// either end is a term written in the query, that term matches itself whether or not
+    /// the graph mentions it — so `:s :p* ?o` yields `?o = :s` even over an empty graph,
+    /// while `VALUES ?v { 1 } ?v :p? ?v` yields nothing.
+    zero_length_restricted_to_graph_nodes: bool,
 }
 
 impl<'a, D: QueryableDataset<'a>> PathEvaluator<'a, D> {
@@ -3058,7 +3073,7 @@ impl<'a, D: QueryableDataset<'a>> PathEvaluator<'a, D> {
             }
             PropertyPath::ZeroOrMore(p) => {
                 if start == end {
-                    true
+                    self.zero_length_matches(start, graph_name)?
                 } else {
                     look_in_transitive_closure(
                         self.eval_from_in_graph(p, start, graph_name),
@@ -3074,7 +3089,7 @@ impl<'a, D: QueryableDataset<'a>> PathEvaluator<'a, D> {
             )?,
             PropertyPath::ZeroOrOne(p) => {
                 if start == end {
-                    Ok(true)
+                    self.zero_length_matches(start, graph_name)
                 } else {
                     self.eval_closed_in_graph(p, start, end, graph_name)
                 }?
@@ -3226,10 +3241,13 @@ impl<'a, D: QueryableDataset<'a>> PathEvaluator<'a, D> {
             PropertyPath::ZeroOrMore(p) => {
                 let eval = self.clone();
                 let p = Rc::clone(p);
+                let start2 = start.clone();
                 let graph_name2 = graph_name.cloned();
-                Box::new(transitive_closure(Some(Ok(start.clone())), move |e| {
-                    eval.eval_from_in_graph(&p, &e, graph_name2.as_ref())
-                }))
+                self.run_if_zero_length_match_allowed(start, graph_name, move || {
+                    transitive_closure(Some(Ok(start2)), move |e| {
+                        eval.eval_from_in_graph(&p, &e, graph_name2.as_ref())
+                    })
+                })
             }
             PropertyPath::OneOrMore(p) => {
                 let eval = self.clone();
@@ -3241,9 +3259,17 @@ impl<'a, D: QueryableDataset<'a>> PathEvaluator<'a, D> {
                 ))
             }
             PropertyPath::ZeroOrOne(p) => {
-                Box::new(hash_deduplicate(
-                    once(Ok(start.clone())).chain(self.eval_from_in_graph(p, start, graph_name)),
-                ))
+                let eval = self.clone();
+                let p = Rc::clone(p);
+                let start2 = start.clone();
+                let graph_name2 = graph_name.cloned();
+                self.run_if_zero_length_match_allowed(start, graph_name, move || {
+                    hash_deduplicate(once(Ok(start2.clone())).chain(eval.eval_from_in_graph(
+                        &p,
+                        &start2,
+                        graph_name2.as_ref(),
+                    )))
+                })
             }
             PropertyPath::NegatedPropertySet(ps) => {
                 let ps = Rc::clone(ps);
@@ -3387,10 +3413,13 @@ impl<'a, D: QueryableDataset<'a>> PathEvaluator<'a, D> {
             PropertyPath::ZeroOrMore(p) => {
                 let eval = self.clone();
                 let p = Rc::clone(p);
+                let end2 = end.clone();
                 let graph_name2 = graph_name.cloned();
-                Box::new(transitive_closure(Some(Ok(end.clone())), move |e| {
-                    eval.eval_to_in_graph(&p, &e, graph_name2.as_ref())
-                }))
+                self.run_if_zero_length_match_allowed(end, graph_name, move || {
+                    transitive_closure(Some(Ok(end2)), move |e| {
+                        eval.eval_to_in_graph(&p, &e, graph_name2.as_ref())
+                    })
+                })
             }
             PropertyPath::OneOrMore(p) => {
                 let eval = self.clone();
@@ -3401,9 +3430,19 @@ impl<'a, D: QueryableDataset<'a>> PathEvaluator<'a, D> {
                     move |e| eval.eval_to_in_graph(&p, &e, graph_name2.as_ref()),
                 ))
             }
-            PropertyPath::ZeroOrOne(p) => Box::new(hash_deduplicate(
-                once(Ok(end.clone())).chain(self.eval_to_in_graph(p, end, graph_name)),
-            )),
+            PropertyPath::ZeroOrOne(p) => {
+                let eval = self.clone();
+                let p = Rc::clone(p);
+                let end2 = end.clone();
+                let graph_name2 = graph_name.cloned();
+                self.run_if_zero_length_match_allowed(end, graph_name, move || {
+                    hash_deduplicate(once(Ok(end2.clone())).chain(eval.eval_to_in_graph(
+                        &p,
+                        &end2,
+                        graph_name2.as_ref(),
+                    )))
+                })
+            }
             PropertyPath::NegatedPropertySet(ps) => {
                 let ps = Rc::clone(ps);
                 Box::new(
@@ -3715,6 +3754,61 @@ impl<'a, D: QueryableDataset<'a>> PathEvaluator<'a, D> {
             })
     }
 
+    /// Whether a zero-length path match on `term` is allowed in `graph_name`.
+    ///
+    /// See [`PathEvaluator::zero_length_restricted_to_graph_nodes`].
+    fn zero_length_matches(
+        &self,
+        term: &D::InternalTerm,
+        graph_name: Option<&D::InternalTerm>,
+    ) -> Result<bool, QueryEvaluationError> {
+        if self.zero_length_restricted_to_graph_nodes {
+            self.is_subject_or_object_in_graph(term, graph_name)
+        } else {
+            Ok(true)
+        }
+    }
+
+    /// Runs `f` unless a zero-length match on `term` is restricted and `term` is not a node
+    /// of `graph_name`.
+    fn run_if_zero_length_match_allowed<
+        T: 'a,
+        I: Iterator<Item = Result<T, QueryEvaluationError>> + 'a,
+    >(
+        &self,
+        term: &D::InternalTerm,
+        graph_name: Option<&D::InternalTerm>,
+        f: impl FnOnce() -> I,
+    ) -> Box<dyn Iterator<Item = Result<T, QueryEvaluationError>> + 'a> {
+        if !self.zero_length_restricted_to_graph_nodes {
+            return Box::new(f());
+        }
+        match self.is_subject_or_object_in_graph(term, graph_name) {
+            Ok(true) => Box::new(f()),
+            Ok(false) => Box::new(empty()), // Not in the database
+            Err(error) => Box::new(once(Err(error))),
+        }
+    }
+
+    fn is_subject_or_object_in_graph(
+        &self,
+        term: &D::InternalTerm,
+        graph_name: Option<&D::InternalTerm>,
+    ) -> Result<bool, QueryEvaluationError> {
+        Ok(self
+            .dataset
+            .internal_quads_for_pattern(Some(term), None, None, Some(graph_name))
+            .next()
+            .transpose()?
+            .is_some()
+            || self
+                .dataset
+                .internal_quads_for_pattern(None, None, Some(term), Some(graph_name))
+                .next()
+                .transpose()?
+                .is_some())
+    }
+
     fn run_if_term_is_a_dataset_node<
         T: 'a,
         I: IntoIterator<Item = Result<T, QueryEvaluationError>> + 'a,
@@ -3751,6 +3845,7 @@ impl<'a, D: QueryableDataset<'a>> Clone for PathEvaluator<'a, D> {
     fn clone(&self) -> Self {
         Self {
             dataset: self.dataset.clone(),
+            zero_length_restricted_to_graph_nodes: self.zero_length_restricted_to_graph_nodes,
         }
     }
 }
