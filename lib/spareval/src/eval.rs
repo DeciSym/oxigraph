@@ -777,10 +777,10 @@ impl<'a, D: QueryableDataset<'a>> SimpleEvaluator<'a, D> {
                     } else {
                         Some(None) // default graph
                     };
-                    if graph_name_reused_in_pattern {
-                        if matches!(input_graph_name, Some(Some(_))) {
-                            input_graph_name = None;
-                        }
+                    if graph_name_reused_in_pattern
+                        && matches!(input_graph_name, Some(Some(_)))
+                    {
+                        input_graph_name = None;
                     }
                     let iter = dataset.internal_quads_for_pattern(
                         input_subject.as_ref(),
@@ -2171,8 +2171,8 @@ struct ExpressionContext<'a, E> {
     stat_children: &'a mut Vec<Rc<EvalNodeWithStats>>,
 }
 
-impl<'a, 'b, D: QueryableDataset<'a>> ExpressionEvaluatorContext<'a>
-    for ExpressionContext<'b, SimpleEvaluator<'a, D>>
+impl<'a, D: QueryableDataset<'a>> ExpressionEvaluatorContext<'a>
+    for ExpressionContext<'_, SimpleEvaluator<'a, D>>
 {
     type Tuple = InternalTuple<D::InternalTerm>;
     type Term = D::InternalTerm;
@@ -2637,7 +2637,7 @@ impl Accumulator for MinAccumulator {
     }
 
     fn finish(&mut self) -> Option<ExpressionTerm> {
-        self.min.clone().and_then(|v| v)
+        self.min.clone().flatten()
     }
 }
 
@@ -2659,11 +2659,10 @@ impl Accumulator for MaxAccumulator {
     }
 
     fn finish(&mut self) -> Option<ExpressionTerm> {
-        self.max.clone().and_then(|v| v)
+        self.max.clone().flatten()
     }
 }
 
-#[expect(clippy::option_option)]
 struct GroupConcatAccumulator {
     concat: Option<String>,
     separator: Rc<str>,
