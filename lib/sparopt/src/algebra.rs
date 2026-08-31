@@ -17,6 +17,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::ops::{Add, BitAnd, BitOr, Div, Mul, Neg, Not, Sub};
+use std::slice;
 
 /// An [expression](https://www.w3.org/TR/sparql11-query/#expressions).
 #[derive(Eq, PartialEq, Debug, Clone, Hash)]
@@ -1184,11 +1185,12 @@ impl GraphPattern {
                 ],
             },
             AlGraphPattern::Graph { inner, name } => {
+                let mut inner_pattern =
+                    Self::from_sparql_algebra(inner, Some(name), blank_nodes);
                 if let NamedNodePattern::Variable(graph_variable) = name
-                    && contains_left_join(inner)
+                    && (contains_left_join(inner)
+                        || graph_variable_used_inside(inner, graph_variable, &inner_pattern))
                 {
-                    let mut inner_pattern =
-                        Self::from_sparql_algebra(inner, Some(name), blank_nodes);
                     let local_graph_variable = fresh_variable_not_in_pattern(&inner_pattern, &[]);
                     rename_graph_position_variable(
                         &mut inner_pattern,
@@ -1230,10 +1232,10 @@ impl GraphPattern {
                             Self::Graph {
                                 graph_name: name.clone(),
                             },
-                            Self::from_sparql_algebra(inner, Some(name), blank_nodes),
+                            inner_pattern,
                         );
                     }
-                    Self::from_sparql_algebra(inner, Some(name), blank_nodes)
+                    inner_pattern
                 }
             }
             AlGraphPattern::Extend {
@@ -1882,6 +1884,37 @@ fn rename_order_expression_variable(order: &mut OrderExpression, from: &Variable
             rename_expression_variable(expression, from, to);
         }
     }
+}
+
+/// Whether `graph_variable` is used inside `inner` for anything other than the graph name
+/// that `GRAPH ?g { ... }` binds.
+///
+/// Only then does the group need the variable-scoping rewrite: SPARQL keeps `?g` out of
+/// scope inside the group, so a `?g` written there is a distinct, initially unbound
+/// variable that the outer graph name has to be joined against.
+///
+/// Looking for `?g` in the lowered pattern directly cannot answer this, because lowering
+/// threads the graph name through the group itself — into quad and path graph positions,
+/// and into sub-select projection lists. Lowering a second time under a fresh graph
+/// variable removes that ambiguity: anything still naming `?g` is a real use.
+fn graph_variable_used_inside(
+    inner: &AlGraphPattern,
+    graph_variable: &Variable,
+    lowered: &GraphPattern,
+) -> bool {
+    let probe_graph_name = NamedNodePattern::Variable(fresh_variable_not_in_pattern(
+        lowered,
+        slice::from_ref(graph_variable),
+    ));
+    let probed =
+        GraphPattern::from_sparql_algebra(inner, Some(&probe_graph_name), &mut HashMap::new());
+    let mut used = false;
+    probed.lookup_used_variables(&mut |variable| {
+        if variable == graph_variable {
+            used = true;
+        }
+    });
+    used
 }
 
 fn rename_variable_in_non_graph_positions(
