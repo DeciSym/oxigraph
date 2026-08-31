@@ -1185,8 +1185,7 @@ impl GraphPattern {
                 ],
             },
             AlGraphPattern::Graph { inner, name } => {
-                let mut inner_pattern =
-                    Self::from_sparql_algebra(inner, Some(name), blank_nodes);
+                let mut inner_pattern = Self::from_sparql_algebra(inner, Some(name), blank_nodes);
                 if let NamedNodePattern::Variable(graph_variable) = name
                     && (contains_left_join(inner)
                         || graph_variable_used_inside(inner, graph_variable, &inner_pattern))

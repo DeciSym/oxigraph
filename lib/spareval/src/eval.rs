@@ -735,8 +735,7 @@ impl<'a, D: QueryableDataset<'a>> SimpleEvaluator<'a, D> {
                 };
                 let dataset = self.dataset.clone();
                 Rc::new(move |from| {
-                    let graph_name_reused_in_pattern =
-                        matches!(&graph_name_selector, Some(TupleSelector::Variable(gv))
+                    let graph_name_reused_in_pattern = matches!(&graph_name_selector, Some(TupleSelector::Variable(gv))
                             if matches!(&subject_selector, TupleSelector::Variable(v) if v == gv)
                                 || matches!(&predicate_selector, TupleSelector::Variable(v) if v == gv)
                                 || matches!(&object_selector, TupleSelector::Variable(v) if v == gv));
@@ -764,22 +763,21 @@ impl<'a, D: QueryableDataset<'a>> SimpleEvaluator<'a, D> {
                         Ok(value) => value,
                         Err(e) => return Box::new(once(Err(e))),
                     };
-                    let mut input_graph_name = if let Some(graph_name_selector) = &graph_name_selector {
-                        match graph_name_selector.get_pattern_value(
-                            &from,
-                            #[cfg(feature = "sparql-12")]
-                            &dataset,
-                        ) {
-                            Ok(value) => value,
-                            Err(e) => return Box::new(once(Err(e))),
-                        }
-                        .map(Some)
-                    } else {
-                        Some(None) // default graph
-                    };
-                    if graph_name_reused_in_pattern
-                        && matches!(input_graph_name, Some(Some(_)))
-                    {
+                    let mut input_graph_name =
+                        if let Some(graph_name_selector) = &graph_name_selector {
+                            match graph_name_selector.get_pattern_value(
+                                &from,
+                                #[cfg(feature = "sparql-12")]
+                                &dataset,
+                            ) {
+                                Ok(value) => value,
+                                Err(e) => return Box::new(once(Err(e))),
+                            }
+                            .map(Some)
+                        } else {
+                            Some(None) // default graph
+                        };
+                    if graph_name_reused_in_pattern && matches!(input_graph_name, Some(Some(_))) {
                         input_graph_name = None;
                     }
                     let iter = dataset.internal_quads_for_pattern(
