@@ -1285,7 +1285,11 @@ impl GraphPattern {
                     variables: variables.clone(),
                     bindings: bindings.clone(),
                 };
-                if let Some(graph_name) = graph_name {
+                // `GRAPH ?g { VALUES ?g { ... } }` has to agree with the graph name the
+                // enclosing GRAPH binds, so join against it. With a *named* graph there is
+                // no such variable to reconcile, and SPARQL evaluates VALUES independently
+                // of whether that graph exists -- joining there would drop the bindings.
+                if let Some(graph_name @ NamedNodePattern::Variable(_)) = graph_name {
                     Self::join(
                         Self::Graph {
                             graph_name: graph_name.clone(),
