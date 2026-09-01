@@ -17,7 +17,7 @@ anyhow.workspace = true
 clap = { workspace = true, features = ["derive"] }
 dissimilar.workspace = true
 json-event-parser.workspace = true
-oxigraph.workspace = true
+oxigraph = { workspace = true, default-features = false } # rocksdb not needed: the suite only uses the in-memory Store::new()
 oxrdf = { workspace = true, features = ["rdfc-10"] }
 oxiri.workspace = true
 oxjsonld.workspace = true
