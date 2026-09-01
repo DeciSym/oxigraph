@@ -336,6 +336,8 @@ opt-level = "z"
 # instead of the patched sources. Point them back at the in-tree copies. Cargo ignores
 # `[patch]` in a dependency, so this has no effect on consumers such as `de`.
 [patch.crates-io]
+oxrdf = { path = "lib/oxrdf" }
+oxsdatatypes = { path = "lib/oxsdatatypes" }
 spargebra = { path = "lib/spargebra" }
 sparopt = { path = "lib/sparopt" }
 sparesults = { path = "lib/sparesults" }
