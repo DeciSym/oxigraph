@@ -1191,11 +1191,18 @@ impl GraphPattern {
                         || graph_variable_used_inside(inner, graph_variable, &inner_pattern))
                 {
                     let local_graph_variable = fresh_variable_not_in_pattern(&inner_pattern, &[]);
+                    let unscoped = inner_pattern.clone();
                     rename_graph_position_variable(
                         &mut inner_pattern,
                         graph_variable,
                         &local_graph_variable,
                     );
+                    if inner_pattern == unscoped {
+                        // No graph position outside a sub-select mentions `?g`, so there is
+                        // nothing for the equality below to reconcile and it would only fail
+                        // against an unbound `local_graph_variable`.
+                        return Self::from_sparql_algebra(inner, Some(name), blank_nodes);
+                    }
                     let graph_check = Self::Graph {
                         graph_name: name.clone(),
                     };
@@ -2073,10 +2080,14 @@ fn rename_graph_position_variable(pattern: &mut GraphPattern, from: &Variable, t
             }
         }
         GraphPattern::Extend { inner, .. }
-        | GraphPattern::Project { inner, .. }
         | GraphPattern::OrderBy { inner, .. }
         | GraphPattern::Group { inner, .. } => rename_graph_position_variable(inner, from, to),
-        GraphPattern::Values { .. } => {}
+        // A sub-select is a scoping boundary that `AlGraphPattern::Project` lowering has
+        // already handled: it either projects the graph variable (so the group's own uses
+        // of it are meant to alias the graph name) or renames its non-graph uses away.
+        // Renaming graph positions underneath it would introduce a variable the sub-select
+        // does not project, and the equality below could never be satisfied.
+        GraphPattern::Project { .. } | GraphPattern::Values { .. } => {}
     }
 }
 
