@@ -12,6 +12,7 @@ mod model;
 mod service;
 mod update;
 
+use crate::dataset::DatasetCardinalityEstimator;
 #[cfg(feature = "sparql-12")]
 pub use crate::dataset::ExpressionTriple;
 pub use crate::dataset::{ExpressionTerm, InternalQuad, QueryableDataset};
@@ -703,7 +704,10 @@ impl PreparedQuery<'_> {
             } => {
                 let mut pattern = GraphPattern::from(pattern);
                 if !self.evaluator.without_optimizations {
-                    pattern = Optimizer::optimize_graph_pattern(pattern);
+                    pattern = Optimizer::optimize_graph_pattern_with_cardinality(
+                        pattern,
+                        &DatasetCardinalityEstimator::new(&dataset),
+                    );
                 }
                 let planning_duration = start_planning.elapsed();
                 let (results, explanation) =
@@ -725,7 +729,10 @@ impl PreparedQuery<'_> {
             } => {
                 let mut pattern = GraphPattern::from(pattern);
                 if !self.evaluator.without_optimizations {
-                    pattern = Optimizer::optimize_graph_pattern(pattern);
+                    pattern = Optimizer::optimize_graph_pattern_with_cardinality(
+                        pattern,
+                        &DatasetCardinalityEstimator::new(&dataset),
+                    );
                 }
                 let planning_duration = start_planning.elapsed();
                 let (results, explanation) =
@@ -750,7 +757,10 @@ impl PreparedQuery<'_> {
             } => {
                 let mut pattern = GraphPattern::from(pattern);
                 if !self.evaluator.without_optimizations {
-                    pattern = Optimizer::optimize_graph_pattern(pattern);
+                    pattern = Optimizer::optimize_graph_pattern_with_cardinality(
+                        pattern,
+                        &DatasetCardinalityEstimator::new(&dataset),
+                    );
                 }
                 let planning_duration = start_planning.elapsed();
                 let (results, explanation) =
@@ -774,7 +784,10 @@ impl PreparedQuery<'_> {
             } => {
                 let mut pattern = GraphPattern::from(pattern);
                 if !self.evaluator.without_optimizations {
-                    pattern = Optimizer::optimize_graph_pattern(pattern);
+                    pattern = Optimizer::optimize_graph_pattern_with_cardinality(
+                        pattern,
+                        &DatasetCardinalityEstimator::new(&dataset),
+                    );
                 }
                 let planning_duration = start_planning.elapsed();
                 let (results, explanation) =
@@ -883,7 +896,10 @@ impl PreparedDeleteInsertUpdate<'_> {
     ) -> Result<DeleteInsertIter<'b>, QueryEvaluationError> {
         let mut pattern = GraphPattern::from(self.pattern);
         if !self.evaluator.without_optimizations {
-            pattern = Optimizer::optimize_graph_pattern(pattern);
+            pattern = Optimizer::optimize_graph_pattern_with_cardinality(
+                pattern,
+                &DatasetCardinalityEstimator::new(&dataset),
+            );
         }
         let (solutions, _) = self
             .evaluator

@@ -4,18 +4,71 @@ use crate::algebra::{
 use crate::type_inference::{
     VariableType, VariableTypes, infer_expression_type, infer_graph_pattern_types,
 };
-use oxrdf::Variable;
 use oxrdf::vocab::rdf;
+use oxrdf::{NamedNodeRef, TermRef, Variable};
 use spargebra::algebra::PropertyPathExpression;
 use spargebra::term::{GroundTermPattern, NamedNodePattern};
 use std::cmp::{max, min};
+
+/// Supplies the optimizer with the real number of quads matching a pattern.
+///
+/// Join reordering is only as good as its size estimates, and without help the optimizer has
+/// nothing to go on but the *shape* of a pattern -- which position is a constant and which is a
+/// variable. That cannot tell a predicate occurring three times from one occurring three million
+/// times, so two same-shaped patterns tie and the order the query happened to be written in
+/// decides the plan.
+///
+/// A store that can count matching quads cheaply -- an HDT package, say, whose index knows the
+/// extent of every pattern -- implements this and gets its real numbers used instead.
+///
+/// Only the *constant* positions of a pattern are passed: a variable is `None` even when the
+/// optimizer knows the input will bind it, because at planning time the value it will be bound to
+/// is not yet known. The optimizer scales the returned count to account for those.
+///
+/// Implementations should be cheap. This is called once per pattern per reordering decision, so an
+/// implementation that has to scan to answer should return `None` instead.
+pub trait CardinalityEstimator {
+    /// The number of quads matching a pattern whose constant positions are the given terms, or
+    /// `None` when the estimator cannot answer cheaply.
+    fn quad_pattern_size(
+        &self,
+        subject: Option<TermRef<'_>>,
+        predicate: Option<NamedNodeRef<'_>>,
+        object: Option<TermRef<'_>>,
+        graph_name: Option<Option<NamedNodeRef<'_>>>,
+    ) -> Option<usize>;
+}
+
+/// The estimator used when the caller supplies none: never answers, so the shape-based estimates
+/// are used unchanged.
+pub struct NoCardinalityEstimator;
+
+impl CardinalityEstimator for NoCardinalityEstimator {
+    fn quad_pattern_size(
+        &self,
+        _subject: Option<TermRef<'_>>,
+        _predicate: Option<NamedNodeRef<'_>>,
+        _object: Option<TermRef<'_>>,
+        _graph_name: Option<Option<NamedNodeRef<'_>>>,
+    ) -> Option<usize> {
+        None
+    }
+}
 
 pub struct Optimizer;
 
 impl Optimizer {
     pub fn optimize_graph_pattern(pattern: GraphPattern) -> GraphPattern {
+        Self::optimize_graph_pattern_with_cardinality(pattern, &NoCardinalityEstimator)
+    }
+
+    /// Optimize a pattern, asking `cardinality` for the real size of each quad pattern.
+    pub fn optimize_graph_pattern_with_cardinality(
+        pattern: GraphPattern,
+        cardinality: &dyn CardinalityEstimator,
+    ) -> GraphPattern {
         let pattern = Self::normalize_pattern(pattern, &VariableTypes::default());
-        let pattern = Self::reorder_joins(pattern, &VariableTypes::default());
+        let pattern = Self::reorder_joins(pattern, &VariableTypes::default(), cardinality);
         Self::push_filters(pattern, Vec::new(), &VariableTypes::default())
     }
 
@@ -499,7 +552,11 @@ impl Optimizer {
         }
     }
 
-    fn reorder_joins(pattern: GraphPattern, input_types: &VariableTypes) -> GraphPattern {
+    fn reorder_joins(
+        pattern: GraphPattern,
+        input_types: &VariableTypes,
+        cardinality: &dyn CardinalityEstimator,
+    ) -> GraphPattern {
         match pattern {
             GraphPattern::QuadPattern { .. }
             | GraphPattern::Path { .. }
@@ -514,7 +571,7 @@ impl Optimizer {
                         todo.push(*right);
                         todo.push(*left);
                     } else {
-                        to_reorder.push(Self::reorder_joins(e, input_types));
+                        to_reorder.push(Self::reorder_joins(e, input_types, cardinality));
                     }
                 }
 
@@ -533,7 +590,9 @@ impl Optimizer {
                     .enumerate()
                     .filter(|(_, v)| **v)
                     .map(|(i, _)| i)
-                    .min_by_key(|i| estimate_graph_pattern_size(&to_reorder[*i], input_types))
+                    .min_by_key(|i| {
+                        estimate_graph_pattern_size(&to_reorder[*i], input_types, cardinality)
+                    })
                 {
                     not_yet_reordered_ids[next_entry_id] = false; // It's now done
                     let mut output = to_reorder[next_entry_id].clone();
@@ -561,6 +620,7 @@ impl Optimizer {
                                     &output_types,
                                     &to_reorder[*i],
                                     input_types,
+                                    cardinality,
                                 )
                             } else {
                                 estimate_join_cost(
@@ -574,6 +634,7 @@ impl Optimizer {
                                         ),
                                     },
                                     input_types,
+                                    cardinality,
                                 )
                             }
                         })
@@ -625,8 +686,8 @@ impl Optimizer {
                             &infer_graph_pattern_types(&right, input_types.clone()),
                             input_types,
                         );
-                        if estimate_graph_pattern_size(&left, input_types)
-                            <= estimate_graph_pattern_size(&right, input_types)
+                        if estimate_graph_pattern_size(&left, input_types, cardinality)
+                            <= estimate_graph_pattern_size(&right, input_types, cardinality)
                         {
                             GraphPattern::join(
                                 left,
@@ -647,8 +708,8 @@ impl Optimizer {
             GraphPattern::Lateral { left, right } => {
                 let left_types = infer_graph_pattern_types(&left, input_types.clone());
                 GraphPattern::lateral(
-                    Self::reorder_joins(*left, input_types),
-                    Self::reorder_joins(*right, &left_types),
+                    Self::reorder_joins(*left, input_types, cardinality),
+                    Self::reorder_joins(*right, &left_types, cardinality),
                 )
             }
             GraphPattern::LeftJoin {
@@ -657,26 +718,36 @@ impl Optimizer {
                 expression,
                 ..
             } => {
-                let left = Self::reorder_joins(*left, input_types);
+                let left = Self::reorder_joins(*left, input_types, cardinality);
                 let left_types = infer_graph_pattern_types(&left, input_types.clone());
                 #[cfg(feature = "sep-0006")]
                 {
                     let initial_right_types =
                         infer_graph_pattern_types(&right, input_types.clone());
                     if has_common_variables(&left_types, &initial_right_types, input_types) {
-                        let lateral_cost = estimate_graph_pattern_size(&left, input_types)
-                            .saturating_mul(estimate_graph_pattern_size(&right, &left_types));
+                        let lateral_cost =
+                            estimate_graph_pattern_size(&left, input_types, cardinality)
+                                .saturating_mul(estimate_graph_pattern_size(
+                                    &right,
+                                    &left_types,
+                                    cardinality,
+                                ));
                         let keys =
                             join_key_variables(&left_types, &initial_right_types, input_types);
-                        let join_cost = estimate_graph_pattern_size(&left, input_types)
-                            .saturating_mul(estimate_graph_pattern_size(&right, input_types))
-                            .saturating_div(
-                                1_000_usize.saturating_pow(keys.len().try_into().unwrap()),
-                            );
+                        let join_cost =
+                            estimate_graph_pattern_size(&left, input_types, cardinality)
+                                .saturating_mul(estimate_graph_pattern_size(
+                                    &right,
+                                    input_types,
+                                    cardinality,
+                                ))
+                                .saturating_div(
+                                    1_000_usize.saturating_pow(keys.len().try_into().unwrap()),
+                                );
 
                         if lateral_cost <= join_cost.saturating_mul(100) {
                             let right_for_lateral =
-                                Self::reorder_joins((*right).clone(), &left_types);
+                                Self::reorder_joins((*right).clone(), &left_types, cardinality);
                             if is_fit_for_for_loop_join(
                                 &right_for_lateral,
                                 input_types,
@@ -697,7 +768,7 @@ impl Optimizer {
                         }
                     }
                 }
-                let right = Self::reorder_joins(*right, input_types);
+                let right = Self::reorder_joins(*right, input_types, cardinality);
                 let right_types = infer_graph_pattern_types(&right, input_types.clone());
                 GraphPattern::left_join(
                     left,
@@ -709,9 +780,9 @@ impl Optimizer {
                 )
             }
             GraphPattern::Minus { left, right, .. } => {
-                let left = Self::reorder_joins(*left, input_types);
+                let left = Self::reorder_joins(*left, input_types, cardinality);
                 let left_types = infer_graph_pattern_types(&left, input_types.clone());
-                let right = Self::reorder_joins(*right, input_types);
+                let right = Self::reorder_joins(*right, input_types, cardinality);
                 let right_types = infer_graph_pattern_types(&right, input_types.clone());
                 GraphPattern::minus(
                     left,
@@ -726,35 +797,42 @@ impl Optimizer {
                 expression,
                 variable,
             } => GraphPattern::extend(
-                Self::reorder_joins(*inner, input_types),
+                Self::reorder_joins(*inner, input_types, cardinality),
                 variable,
                 expression,
             ),
-            GraphPattern::Filter { inner, expression } => {
-                GraphPattern::filter(Self::reorder_joins(*inner, input_types), expression)
-            }
+            GraphPattern::Filter { inner, expression } => GraphPattern::filter(
+                Self::reorder_joins(*inner, input_types, cardinality),
+                expression,
+            ),
             GraphPattern::Union { inner } => GraphPattern::union_all(
                 inner
                     .into_iter()
-                    .map(|c| Self::reorder_joins(c, input_types)),
+                    .map(|c| Self::reorder_joins(c, input_types, cardinality)),
             ),
             GraphPattern::Slice {
                 inner,
                 start,
                 length,
-            } => GraphPattern::slice(Self::reorder_joins(*inner, input_types), start, length),
+            } => GraphPattern::slice(
+                Self::reorder_joins(*inner, input_types, cardinality),
+                start,
+                length,
+            ),
             GraphPattern::Distinct { inner } => {
-                GraphPattern::distinct(Self::reorder_joins(*inner, input_types))
+                GraphPattern::distinct(Self::reorder_joins(*inner, input_types, cardinality))
             }
             GraphPattern::Reduced { inner } => {
-                GraphPattern::reduced(Self::reorder_joins(*inner, input_types))
+                GraphPattern::reduced(Self::reorder_joins(*inner, input_types, cardinality))
             }
-            GraphPattern::Project { inner, variables } => {
-                GraphPattern::project(Self::reorder_joins(*inner, input_types), variables)
-            }
-            GraphPattern::OrderBy { inner, expression } => {
-                GraphPattern::order_by(Self::reorder_joins(*inner, input_types), expression)
-            }
+            GraphPattern::Project { inner, variables } => GraphPattern::project(
+                Self::reorder_joins(*inner, input_types, cardinality),
+                variables,
+            ),
+            GraphPattern::OrderBy { inner, expression } => GraphPattern::order_by(
+                Self::reorder_joins(*inner, input_types, cardinality),
+                expression,
+            ),
             GraphPattern::Service { .. } => {
                 // We don't do join reordering inside of SERVICE calls, we don't know about cardinalities
                 pattern
@@ -764,7 +842,7 @@ impl Optimizer {
                 variables,
                 aggregates,
             } => GraphPattern::group(
-                Self::reorder_joins(*inner, input_types),
+                Self::reorder_joins(*inner, input_types, cardinality),
                 variables,
                 aggregates,
             ),
@@ -938,27 +1016,26 @@ fn join_key_variables(
         .collect()
 }
 
-fn estimate_graph_pattern_size(pattern: &GraphPattern, input_types: &VariableTypes) -> usize {
+fn estimate_graph_pattern_size(
+    pattern: &GraphPattern,
+    input_types: &VariableTypes,
+    cardinality: &dyn CardinalityEstimator,
+) -> usize {
     match pattern {
         GraphPattern::Values { bindings, .. } => bindings.len(),
         GraphPattern::QuadPattern {
             subject,
             predicate,
             object,
-            ..
-        } => {
-            let mut size = estimate_triple_pattern_size(
-                is_term_pattern_bound(subject, input_types),
-                is_named_node_pattern_bound(predicate, input_types),
-                is_term_pattern_bound(object, input_types),
-            );
-            if let NamedNodePattern::NamedNode(predicate) = predicate {
-                if *predicate == rdf::TYPE {
-                    size = size.saturating_add(1);
-                }
-            }
-            size
-        }
+            graph_name,
+        } => estimate_quad_pattern_size(
+            subject,
+            predicate,
+            object,
+            graph_name.as_ref(),
+            input_types,
+            cardinality,
+        ),
         GraphPattern::Path {
             subject,
             path,
@@ -980,7 +1057,7 @@ fn estimate_graph_pattern_size(pattern: &GraphPattern, input_types: &VariableTyp
             left,
             right,
             algorithm,
-        } => estimate_join_cost(left, right, algorithm, input_types),
+        } => estimate_join_cost(left, right, algorithm, input_types, cardinality),
         GraphPattern::LeftJoin {
             left,
             right,
@@ -988,13 +1065,14 @@ fn estimate_graph_pattern_size(pattern: &GraphPattern, input_types: &VariableTyp
             ..
         } => match algorithm {
             LeftJoinAlgorithm::HashBuildRightProbeLeft { keys } => {
-                let left_size = estimate_graph_pattern_size(left, input_types);
+                let left_size = estimate_graph_pattern_size(left, input_types, cardinality);
                 max(
                     left_size,
                     left_size
                         .saturating_mul(estimate_graph_pattern_size(
                             right,
                             &infer_graph_pattern_types(right, input_types.clone()),
+                            cardinality,
                         ))
                         .saturating_div(1_000_usize.saturating_pow(keys.len().try_into().unwrap())),
                 )
@@ -1006,12 +1084,15 @@ fn estimate_graph_pattern_size(pattern: &GraphPattern, input_types: &VariableTyp
             &infer_graph_pattern_types(left, input_types.clone()),
             right,
             input_types,
+            cardinality,
         ),
         GraphPattern::Union { inner } => inner
             .iter()
-            .map(|inner| estimate_graph_pattern_size(inner, input_types))
+            .map(|inner| estimate_graph_pattern_size(inner, input_types, cardinality))
             .fold(0, usize::saturating_add),
-        GraphPattern::Minus { left, .. } => estimate_graph_pattern_size(left, input_types),
+        GraphPattern::Minus { left, .. } => {
+            estimate_graph_pattern_size(left, input_types, cardinality)
+        }
         GraphPattern::Filter { inner, .. }
         | GraphPattern::Extend { inner, .. }
         | GraphPattern::OrderBy { inner, .. }
@@ -1019,13 +1100,16 @@ fn estimate_graph_pattern_size(pattern: &GraphPattern, input_types: &VariableTyp
         | GraphPattern::Distinct { inner, .. }
         | GraphPattern::Reduced { inner, .. }
         | GraphPattern::Group { inner, .. }
-        | GraphPattern::Service { inner, .. } => estimate_graph_pattern_size(inner, input_types),
+        | GraphPattern::Service { inner, .. } => {
+            estimate_graph_pattern_size(inner, input_types, cardinality)
+        }
         GraphPattern::Slice {
             inner,
             start,
             length,
         } => {
-            let inner = estimate_graph_pattern_size(inner, input_types).saturating_sub(*start);
+            let inner =
+                estimate_graph_pattern_size(inner, input_types, cardinality).saturating_sub(*start);
             if let Some(length) = length {
                 min(inner, *length)
             } else {
@@ -1040,11 +1124,12 @@ fn estimate_join_cost(
     right: &GraphPattern,
     algorithm: &JoinAlgorithm,
     input_types: &VariableTypes,
+    cardinality: &dyn CardinalityEstimator,
 ) -> usize {
     match algorithm {
         JoinAlgorithm::HashBuildLeftProbeRight { keys } => {
-            estimate_graph_pattern_size(left, input_types)
-                .saturating_mul(estimate_graph_pattern_size(right, input_types))
+            estimate_graph_pattern_size(left, input_types, cardinality)
+                .saturating_mul(estimate_graph_pattern_size(right, input_types, cardinality))
                 .saturating_div(1_000_usize.saturating_pow(keys.len().try_into().unwrap()))
         }
     }
@@ -1055,9 +1140,87 @@ fn estimate_lateral_cost(
     left_types: &VariableTypes,
     right: &GraphPattern,
     input_types: &VariableTypes,
+    cardinality: &dyn CardinalityEstimator,
 ) -> usize {
-    estimate_graph_pattern_size(left, input_types)
-        .saturating_mul(estimate_graph_pattern_size(right, left_types))
+    estimate_graph_pattern_size(left, input_types, cardinality)
+        .saturating_mul(estimate_graph_pattern_size(right, left_types, cardinality))
+}
+
+/// Size of one quad pattern, preferring the store's own count over the shape-based guess.
+///
+/// The estimator only knows about the pattern's constants, so its answer has to be adjusted for
+/// the positions the input will bind: the shape table's ratio between "what the input will bind"
+/// and "constants only" is exactly that adjustment, and applying it leaves the measured count
+/// untouched when the input binds nothing new.
+fn estimate_quad_pattern_size(
+    subject: &GroundTermPattern,
+    predicate: &NamedNodePattern,
+    object: &GroundTermPattern,
+    graph_name: Option<&NamedNodePattern>,
+    input_types: &VariableTypes,
+    cardinality: &dyn CardinalityEstimator,
+) -> usize {
+    let shape = estimate_triple_pattern_size(
+        is_term_pattern_bound(subject, input_types),
+        is_named_node_pattern_bound(predicate, input_types),
+        is_term_pattern_bound(object, input_types),
+    );
+    let Some(measured) = cardinality.quad_pattern_size(
+        term_pattern_constant(subject),
+        named_node_pattern_constant(predicate),
+        term_pattern_constant(object),
+        graph_name_constant(graph_name),
+    ) else {
+        // With only the shape to go on, an `rdf:type` pattern scores one more than any other of
+        // its shape, so that of two otherwise tied patterns it is joined later.
+        if let NamedNodePattern::NamedNode(predicate) = predicate {
+            if *predicate == rdf::TYPE {
+                return shape.saturating_add(1);
+            }
+        }
+        return shape;
+    };
+    if measured == 0 {
+        return 0;
+    }
+    let constants_shape = estimate_triple_pattern_size(
+        term_pattern_constant(subject).is_some(),
+        named_node_pattern_constant(predicate).is_some(),
+        term_pattern_constant(object).is_some(),
+    );
+    // At least 1: a pattern the store says matches something must not look free.
+    max(1, measured.saturating_mul(shape) / constants_shape)
+}
+
+/// The term at a pattern position when it is a constant, `None` when it is a variable.
+///
+/// Quoted triples are always `None`: a store asked for a cardinality cannot be handed one through
+/// this interface, and a pattern containing one is rare enough not to be worth widening it for.
+fn term_pattern_constant(pattern: &GroundTermPattern) -> Option<TermRef<'_>> {
+    match pattern {
+        GroundTermPattern::NamedNode(term) => Some(term.as_ref().into()),
+        GroundTermPattern::Literal(term) => Some(term.as_ref().into()),
+        GroundTermPattern::Variable(_) => None,
+        #[cfg(feature = "sparql-12")]
+        GroundTermPattern::Triple(_) => None,
+    }
+}
+
+fn named_node_pattern_constant(pattern: &NamedNodePattern) -> Option<NamedNodeRef<'_>> {
+    match pattern {
+        NamedNodePattern::NamedNode(node) => Some(node.as_ref()),
+        NamedNodePattern::Variable(_) => None,
+    }
+}
+
+/// Encoded the way [`CardinalityEstimator`] expects: `Some(None)` for the default graph,
+/// `Some(Some(iri))` for one named graph, and `None` when the graph is itself a variable.
+fn graph_name_constant(pattern: Option<&NamedNodePattern>) -> Option<Option<NamedNodeRef<'_>>> {
+    match pattern {
+        None => Some(None),
+        Some(NamedNodePattern::NamedNode(node)) => Some(Some(node.as_ref())),
+        Some(NamedNodePattern::Variable(_)) => None,
+    }
 }
 
 fn estimate_triple_pattern_size(

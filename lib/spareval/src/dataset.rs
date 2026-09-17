@@ -1,8 +1,8 @@
 #[cfg(feature = "sparql-12")]
 use oxrdf::BaseDirection;
 use oxrdf::{
-    BlankNode, Dataset, GraphNameRef, Literal, NamedNode, NamedOrBlankNodeRef, QuadRef, Term,
-    TermRef,
+    BlankNode, Dataset, GraphNameRef, Literal, NamedNode, NamedNodeRef, NamedOrBlankNodeRef,
+    QuadRef, Term, TermRef,
 };
 #[cfg(feature = "sparql-12")]
 use oxrdf::{NamedOrBlankNode, Triple};
@@ -11,7 +11,9 @@ use oxsdatatypes::{Boolean, DateTime, Decimal, Double, Float, Integer};
 use oxsdatatypes::{Date, DayTimeDuration, Duration, Time, YearMonthDuration};
 #[cfg(feature = "calendar-ext")]
 use oxsdatatypes::{GDay, GMonth, GMonthDay, GYear, GYearMonth};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
+use sparopt::CardinalityEstimator;
+use std::cell::RefCell;
 use std::convert::Infallible;
 use std::error::Error;
 use std::hash::{Hash, Hasher};
@@ -109,6 +111,111 @@ pub trait QueryableDataset<'a>: Sized + 'a {
         Ok(self
             .externalize_expression_term(term)?
             .effective_boolean_value())
+    }
+
+    /// How many quads match a pattern, for join reordering.
+    ///
+    /// The optimizer has no way to tell a selective triple pattern from an unselective one of the
+    /// same shape, so without this it falls back to a fixed table of guesses and, when two patterns
+    /// of a basic graph pattern tie, leaves them in the order the query was written. A dataset
+    /// whose index can count matches cheaply -- an HDT package knows the extent of most patterns in
+    /// constant time -- should answer here and get its own numbers used instead.
+    ///
+    /// The count need not be exact; it is compared against other patterns' counts, not reported.
+    /// It is also taken before the query's `FROM`/`FROM NAMED` restriction is applied, so a dataset
+    /// need not model that.
+    ///
+    /// Return `None` -- the default -- when answering would cost more than the better plan saves.
+    /// This is called once per pattern per reordering decision, so it must not scan.
+    fn estimated_cardinality(
+        &self,
+        _subject: Option<&Self::InternalTerm>,
+        _predicate: Option<&Self::InternalTerm>,
+        _object: Option<&Self::InternalTerm>,
+        _graph_name: Option<Option<&Self::InternalTerm>>,
+    ) -> Option<usize> {
+        None
+    }
+}
+
+/// Adapts a [`QueryableDataset`] to the optimizer's [`CardinalityEstimator`].
+///
+/// The optimizer works in RDF terms and the dataset in its own internal ones, so each constant is
+/// internalized on the way through. A dataset that cannot internalize a term -- because it is not
+/// in its dictionary, or for any other reason -- simply has no count for that pattern, which the
+/// optimizer reads as "no information" and handles by falling back to its shape-based guess.
+pub(crate) struct DatasetCardinalityEstimator<'a, D> {
+    dataset: &'a D,
+    /// Answers already given during this optimization.
+    ///
+    /// Greedy join reordering re-estimates the same pattern once per candidate it considers, so a
+    /// basic graph pattern of n patterns asks about each of them O(n) times. The dataset's answer
+    /// cannot change while a single pattern is being optimized, and for a store that has to do
+    /// real work to count -- sampling an index, walking a dictionary -- recomputing it turns a
+    /// planning aid into a planning cost.
+    memo: RefCell<FxHashMap<CardinalityKey, Option<usize>>>,
+}
+
+/// The constant positions of a quad pattern, as the optimizer asked about them.
+type CardinalityKey = (
+    Option<Term>,
+    Option<NamedNode>,
+    Option<Term>,
+    Option<Option<NamedNode>>,
+);
+
+impl<'a, D> DatasetCardinalityEstimator<'a, D> {
+    pub(crate) fn new(dataset: &'a D) -> Self {
+        Self {
+            dataset,
+            memo: RefCell::new(FxHashMap::default()),
+        }
+    }
+}
+
+impl<'a, 'b, D: QueryableDataset<'b>> CardinalityEstimator for DatasetCardinalityEstimator<'a, D> {
+    fn quad_pattern_size(
+        &self,
+        subject: Option<TermRef<'_>>,
+        predicate: Option<NamedNodeRef<'_>>,
+        object: Option<TermRef<'_>>,
+        graph_name: Option<Option<NamedNodeRef<'_>>>,
+    ) -> Option<usize> {
+        let key: CardinalityKey = (
+            subject.map(TermRef::into_owned),
+            predicate.map(NamedNodeRef::into_owned),
+            object.map(TermRef::into_owned),
+            graph_name.map(|g| g.map(NamedNodeRef::into_owned)),
+        );
+        if let Some(cached) = self.memo.borrow().get(&key) {
+            return *cached;
+        }
+        let size = self.measure(&key);
+        self.memo.borrow_mut().insert(key, size);
+        size
+    }
+}
+
+impl<'a, 'b, D: QueryableDataset<'b>> DatasetCardinalityEstimator<'a, D> {
+    fn measure(&self, key: &CardinalityKey) -> Option<usize> {
+        let (subject, predicate, object, graph_name) = key.clone();
+        let internalize = |term: Option<Term>| match term {
+            Some(term) => self.dataset.internalize_term(term).ok().map(Some),
+            None => Some(None),
+        };
+        let subject = internalize(subject)?;
+        let predicate = internalize(predicate.map(Into::into))?;
+        let object = internalize(object)?;
+        let graph_name = match graph_name {
+            Some(graph_name) => Some(internalize(graph_name.map(Into::into))?),
+            None => None,
+        };
+        self.dataset.estimated_cardinality(
+            subject.as_ref(),
+            predicate.as_ref(),
+            object.as_ref(),
+            graph_name.as_ref().map(Option::as_ref),
+        )
     }
 }
 
