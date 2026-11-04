@@ -4,7 +4,7 @@
 #![doc(html_favicon_url = "https://raw.githubusercontent.com/oxigraph/oxigraph/main/logo.svg")]
 #![doc(html_logo_url = "https://raw.githubusercontent.com/oxigraph/oxigraph/main/logo.svg")]
 
-pub use crate::optimizer::Optimizer;
+pub use crate::optimizer::{CardinalityEstimator, NoCardinalityEstimator, Optimizer};
 
 pub mod algebra;
 mod optimizer;

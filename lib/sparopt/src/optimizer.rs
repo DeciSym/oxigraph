@@ -4,21 +4,78 @@ use crate::algebra::{
 use crate::type_inference::{
     VariableType, VariableTypes, infer_expression_type, infer_query_expression_types,
 };
-use oxrdf::Variable;
 use oxrdf::vocab::rdf;
+use oxrdf::{NamedNodeRef, TermRef, Variable};
 use spargebra::algebra::PropertyPathExpression;
 use spargebra::term::{NamedNodePattern, TermPattern};
 use spargebra::vocab::sparql;
 use std::cmp::{max, min};
 
+/// Supplies the optimizer with the real number of quads matching a pattern.
+///
+/// Join reordering is only as good as its size estimates, and without help the optimizer has
+/// nothing to go on but the *shape* of a pattern: which positions are constants and which are
+/// variables. That cannot tell a predicate occurring three times from one occurring three million
+/// times, so two patterns of the same shape tie, and the order in which the query was written
+/// decides the plan.
+///
+/// A dataset that can count matching quads cheaply implements this, and its counts are used in
+/// place of the shape-based estimates.
+///
+/// Only the *constant* positions of a pattern are passed. A variable is `None` even when the
+/// optimizer knows its value will be bound by the time the pattern is evaluated, because the value
+/// itself is not known at planning time; the optimizer scales the returned count to account for it.
+///
+/// Implementations should be cheap: the optimizer may ask about the same pattern several times
+/// while it reorders a single basic graph pattern. One that would have to scan to answer should
+/// return `None`.
+pub trait CardinalityEstimator {
+    /// The number of quads matching a pattern whose constant positions are the given terms, or
+    /// `None` if the estimator cannot answer cheaply.
+    ///
+    /// `graph_name` is `Some(None)` for the default graph, `Some(Some(_))` for a named graph and
+    /// `None` when the graph is itself a variable.
+    fn quad_pattern_size(
+        &self,
+        subject: Option<TermRef<'_>>,
+        predicate: Option<NamedNodeRef<'_>>,
+        object: Option<TermRef<'_>>,
+        graph_name: Option<Option<NamedNodeRef<'_>>>,
+    ) -> Option<u64>;
+}
+
+/// An estimator that never answers, so that the shape-based estimates are used unchanged.
+pub struct NoCardinalityEstimator;
+
+impl CardinalityEstimator for NoCardinalityEstimator {
+    fn quad_pattern_size(
+        &self,
+        _subject: Option<TermRef<'_>>,
+        _predicate: Option<NamedNodeRef<'_>>,
+        _object: Option<TermRef<'_>>,
+        _graph_name: Option<Option<NamedNodeRef<'_>>>,
+    ) -> Option<u64> {
+        None
+    }
+}
+
 pub struct Optimizer;
 
 impl Optimizer {
     pub fn optimize_query_expression(query_expression: QueryExpression) -> QueryExpression {
+        Self::optimize_query_expression_with_cardinality(query_expression, &NoCardinalityEstimator)
+    }
+
+    /// Optimizes a query expression, asking `cardinality` for the size of each quad pattern when
+    /// reordering joins.
+    pub fn optimize_query_expression_with_cardinality(
+        query_expression: QueryExpression,
+        cardinality: &dyn CardinalityEstimator,
+    ) -> QueryExpression {
         let input_types = VariableTypes::default();
         let query_expression = Self::normalize_pattern(query_expression, &input_types);
         let query_expression = Self::push_graph(query_expression, None, &input_types);
-        let query_expression = Self::reorder_joins(query_expression, &input_types);
+        let query_expression = Self::reorder_joins(query_expression, &input_types, cardinality);
         Self::push_filters(query_expression, Vec::new(), &input_types)
     }
 
@@ -818,6 +875,7 @@ impl Optimizer {
     fn reorder_joins(
         query_expression: QueryExpression,
         input_types: &VariableTypes,
+        cardinality: &dyn CardinalityEstimator,
     ) -> QueryExpression {
         match query_expression {
             QueryExpression::QuadPattern { .. }
@@ -832,7 +890,7 @@ impl Optimizer {
                         todo.push(*right);
                         todo.push(*left);
                     } else {
-                        to_reorder.push(Self::reorder_joins(e, input_types));
+                        to_reorder.push(Self::reorder_joins(e, input_types, cardinality));
                     }
                 }
 
@@ -851,7 +909,9 @@ impl Optimizer {
                     .enumerate()
                     .filter(|(_, v)| **v)
                     .map(|(i, _)| i)
-                    .min_by_key(|i| estimate_query_expression_size(&to_reorder[*i], input_types))
+                    .min_by_key(|i| {
+                        estimate_query_expression_size(&to_reorder[*i], input_types, cardinality)
+                    })
                 {
                     not_yet_reordered_ids[next_entry_id] = false; // It's now done
                     let mut output = to_reorder[next_entry_id].clone();
@@ -879,6 +939,7 @@ impl Optimizer {
                                     &output_types,
                                     &to_reorder[*i],
                                     input_types,
+                                    cardinality,
                                 )
                             } else {
                                 estimate_join_cost(
@@ -892,6 +953,7 @@ impl Optimizer {
                                         ),
                                     },
                                     input_types,
+                                    cardinality,
                                 )
                             }
                         })
@@ -943,8 +1005,8 @@ impl Optimizer {
                             &infer_query_expression_types(&right, input_types.clone()),
                             input_types,
                         );
-                        if estimate_query_expression_size(&left, input_types)
-                            <= estimate_query_expression_size(&right, input_types)
+                        if estimate_query_expression_size(&left, input_types, cardinality)
+                            <= estimate_query_expression_size(&right, input_types, cardinality)
                         {
                             QueryExpression::join(
                                 left,
@@ -965,8 +1027,8 @@ impl Optimizer {
             QueryExpression::Lateral { left, right } => {
                 let left_types = infer_query_expression_types(&left, input_types.clone());
                 QueryExpression::lateral(
-                    Self::reorder_joins(*left, input_types),
-                    Self::reorder_joins(*right, &left_types),
+                    Self::reorder_joins(*left, input_types, cardinality),
+                    Self::reorder_joins(*right, &left_types, cardinality),
                 )
             }
             QueryExpression::LeftJoin {
@@ -975,26 +1037,36 @@ impl Optimizer {
                 expression,
                 ..
             } => {
-                let left = Self::reorder_joins(*left, input_types);
+                let left = Self::reorder_joins(*left, input_types, cardinality);
                 let left_types = infer_query_expression_types(&left, input_types.clone());
                 #[cfg(feature = "sep-0006")]
                 {
                     let initial_right_types =
                         infer_query_expression_types(&right, input_types.clone());
                     if has_common_variables(&left_types, &initial_right_types, input_types) {
-                        let lateral_cost = estimate_query_expression_size(&left, input_types)
-                            .saturating_mul(estimate_query_expression_size(&right, &left_types));
+                        let lateral_cost =
+                            estimate_query_expression_size(&left, input_types, cardinality)
+                                .saturating_mul(estimate_query_expression_size(
+                                    &right,
+                                    &left_types,
+                                    cardinality,
+                                ));
                         let keys =
                             join_key_variables(&left_types, &initial_right_types, input_types);
-                        let join_cost = estimate_query_expression_size(&left, input_types)
-                            .saturating_mul(estimate_query_expression_size(&right, input_types))
-                            .saturating_div(
-                                1_000_u64.saturating_pow(keys.len().try_into().unwrap()),
-                            );
+                        let join_cost =
+                            estimate_query_expression_size(&left, input_types, cardinality)
+                                .saturating_mul(estimate_query_expression_size(
+                                    &right,
+                                    input_types,
+                                    cardinality,
+                                ))
+                                .saturating_div(
+                                    1_000_u64.saturating_pow(keys.len().try_into().unwrap()),
+                                );
 
                         if lateral_cost <= join_cost.saturating_mul(100) {
                             let right_for_lateral =
-                                Self::reorder_joins((*right).clone(), &left_types);
+                                Self::reorder_joins((*right).clone(), &left_types, cardinality);
                             if is_fit_for_for_loop_join(
                                 &right_for_lateral,
                                 input_types,
@@ -1015,7 +1087,7 @@ impl Optimizer {
                         }
                     }
                 }
-                let right = Self::reorder_joins(*right, input_types);
+                let right = Self::reorder_joins(*right, input_types, cardinality);
                 let right_types = infer_query_expression_types(&right, input_types.clone());
                 QueryExpression::left_join(
                     left,
@@ -1027,9 +1099,9 @@ impl Optimizer {
                 )
             }
             QueryExpression::Minus { left, right, .. } => {
-                let left = Self::reorder_joins(*left, input_types);
+                let left = Self::reorder_joins(*left, input_types, cardinality);
                 let left_types = infer_query_expression_types(&left, input_types.clone());
-                let right = Self::reorder_joins(*right, input_types);
+                let right = Self::reorder_joins(*right, input_types, cardinality);
                 let right_types = infer_query_expression_types(&right, input_types.clone());
                 QueryExpression::minus(
                     left,
@@ -1039,43 +1111,51 @@ impl Optimizer {
                     },
                 )
             }
-            QueryExpression::Graph { graph_name, inner } => {
-                QueryExpression::graph(Self::reorder_joins(*inner, input_types), graph_name)
-            }
+            QueryExpression::Graph { graph_name, inner } => QueryExpression::graph(
+                Self::reorder_joins(*inner, input_types, cardinality),
+                graph_name,
+            ),
             QueryExpression::Extend {
                 inner,
                 expression,
                 variable,
             } => QueryExpression::extend(
-                Self::reorder_joins(*inner, input_types),
+                Self::reorder_joins(*inner, input_types, cardinality),
                 variable,
                 expression,
             ),
-            QueryExpression::Filter { inner, expression } => {
-                QueryExpression::filter(Self::reorder_joins(*inner, input_types), expression)
-            }
+            QueryExpression::Filter { inner, expression } => QueryExpression::filter(
+                Self::reorder_joins(*inner, input_types, cardinality),
+                expression,
+            ),
             QueryExpression::Union { inner } => QueryExpression::union_all(
                 inner
                     .into_iter()
-                    .map(|c| Self::reorder_joins(c, input_types)),
+                    .map(|c| Self::reorder_joins(c, input_types, cardinality)),
             ),
             QueryExpression::Slice {
                 inner,
                 offset,
                 limit,
-            } => QueryExpression::slice(Self::reorder_joins(*inner, input_types), offset, limit),
+            } => QueryExpression::slice(
+                Self::reorder_joins(*inner, input_types, cardinality),
+                offset,
+                limit,
+            ),
             QueryExpression::Distinct { inner } => {
-                QueryExpression::distinct(Self::reorder_joins(*inner, input_types))
+                QueryExpression::distinct(Self::reorder_joins(*inner, input_types, cardinality))
             }
             QueryExpression::Reduced { inner } => {
-                QueryExpression::reduced(Self::reorder_joins(*inner, input_types))
+                QueryExpression::reduced(Self::reorder_joins(*inner, input_types, cardinality))
             }
-            QueryExpression::Project { inner, variables } => {
-                QueryExpression::project(Self::reorder_joins(*inner, input_types), variables)
-            }
-            QueryExpression::OrderBy { inner, expression } => {
-                QueryExpression::order_by(Self::reorder_joins(*inner, input_types), expression)
-            }
+            QueryExpression::Project { inner, variables } => QueryExpression::project(
+                Self::reorder_joins(*inner, input_types, cardinality),
+                variables,
+            ),
+            QueryExpression::OrderBy { inner, expression } => QueryExpression::order_by(
+                Self::reorder_joins(*inner, input_types, cardinality),
+                expression,
+            ),
             QueryExpression::Service { .. } => {
                 // We don't do join reordering inside of SERVICE calls, we don't know about cardinalities
                 query_expression
@@ -1085,7 +1165,7 @@ impl Optimizer {
                 variables,
                 aggregates,
             } => QueryExpression::group(
-                Self::reorder_joins(*inner, input_types),
+                Self::reorder_joins(*inner, input_types, cardinality),
                 variables,
                 aggregates,
             ),
@@ -1292,6 +1372,7 @@ fn join_key_variables(
 fn estimate_query_expression_size(
     expression: &QueryExpression,
     input_types: &VariableTypes,
+    cardinality: &dyn CardinalityEstimator,
 ) -> u64 {
     match expression {
         QueryExpression::Values { bindings, .. } => bindings.len().try_into().unwrap(),
@@ -1299,20 +1380,15 @@ fn estimate_query_expression_size(
             subject,
             predicate,
             object,
-            ..
-        } => {
-            let mut size = estimate_triple_pattern_size(
-                is_term_pattern_bound(subject, input_types),
-                is_named_node_pattern_bound(predicate, input_types),
-                is_term_pattern_bound(object, input_types),
-            );
-            if let NamedNodePattern::NamedNode(predicate) = predicate {
-                if *predicate == rdf::TYPE {
-                    size = size.saturating_add(1);
-                }
-            }
-            size
-        }
+            graph_name,
+        } => estimate_quad_pattern_size(
+            subject,
+            predicate,
+            object,
+            graph_name.as_ref(),
+            input_types,
+            cardinality,
+        ),
         QueryExpression::Path {
             subject,
             path,
@@ -1329,13 +1405,17 @@ fn estimate_query_expression_size(
             } else {
                 100
             })
-            .saturating_mul(estimate_query_expression_size(inner, input_types))
+            .saturating_mul(estimate_query_expression_size(
+                inner,
+                input_types,
+                cardinality,
+            ))
         }
         QueryExpression::Join {
             left,
             right,
             algorithm,
-        } => estimate_join_cost(left, right, algorithm, input_types),
+        } => estimate_join_cost(left, right, algorithm, input_types, cardinality),
         QueryExpression::LeftJoin {
             left,
             right,
@@ -1343,13 +1423,14 @@ fn estimate_query_expression_size(
             ..
         } => match algorithm {
             LeftJoinAlgorithm::HashBuildRightProbeLeft { keys } => {
-                let left_size = estimate_query_expression_size(left, input_types);
+                let left_size = estimate_query_expression_size(left, input_types, cardinality);
                 max(
                     left_size,
                     left_size
                         .saturating_mul(estimate_query_expression_size(
                             right,
                             &infer_query_expression_types(right, input_types.clone()),
+                            cardinality,
                         ))
                         .saturating_div(1_000_u64.saturating_pow(keys.len().try_into().unwrap())),
                 )
@@ -1361,12 +1442,15 @@ fn estimate_query_expression_size(
             &infer_query_expression_types(left, input_types.clone()),
             right,
             input_types,
+            cardinality,
         ),
         QueryExpression::Union { inner } => inner
             .iter()
-            .map(|inner| estimate_query_expression_size(inner, input_types))
+            .map(|inner| estimate_query_expression_size(inner, input_types, cardinality))
             .fold(0, u64::saturating_add),
-        QueryExpression::Minus { left, .. } => estimate_query_expression_size(left, input_types),
+        QueryExpression::Minus { left, .. } => {
+            estimate_query_expression_size(left, input_types, cardinality)
+        }
         QueryExpression::Filter { inner, .. }
         | QueryExpression::Extend { inner, .. }
         | QueryExpression::OrderBy { inner, .. }
@@ -1375,14 +1459,15 @@ fn estimate_query_expression_size(
         | QueryExpression::Reduced { inner, .. }
         | QueryExpression::Group { inner, .. }
         | QueryExpression::Service { inner, .. } => {
-            estimate_query_expression_size(inner, input_types)
+            estimate_query_expression_size(inner, input_types, cardinality)
         }
         QueryExpression::Slice {
             inner,
             offset,
             limit,
         } => {
-            let inner = estimate_query_expression_size(inner, input_types).saturating_sub(*offset);
+            let inner = estimate_query_expression_size(inner, input_types, cardinality)
+                .saturating_sub(*offset);
             if let Some(limit) = limit {
                 min(inner, *limit)
             } else {
@@ -1397,11 +1482,16 @@ fn estimate_join_cost(
     right: &QueryExpression,
     algorithm: &JoinAlgorithm,
     input_types: &VariableTypes,
+    cardinality: &dyn CardinalityEstimator,
 ) -> u64 {
     match algorithm {
         JoinAlgorithm::HashBuildLeftProbeRight { keys } => {
-            estimate_query_expression_size(left, input_types)
-                .saturating_mul(estimate_query_expression_size(right, input_types))
+            estimate_query_expression_size(left, input_types, cardinality)
+                .saturating_mul(estimate_query_expression_size(
+                    right,
+                    input_types,
+                    cardinality,
+                ))
                 .saturating_div(1_000_u64.saturating_pow(keys.len().try_into().unwrap()))
         }
     }
@@ -1412,9 +1502,85 @@ fn estimate_lateral_cost(
     left_types: &VariableTypes,
     right: &QueryExpression,
     input_types: &VariableTypes,
+    cardinality: &dyn CardinalityEstimator,
 ) -> u64 {
-    estimate_query_expression_size(left, input_types)
-        .saturating_mul(estimate_query_expression_size(right, left_types))
+    estimate_query_expression_size(left, input_types, cardinality).saturating_mul(
+        estimate_query_expression_size(right, left_types, cardinality),
+    )
+}
+
+/// Estimates the size of a quad pattern: from `cardinality` when it answers, from the pattern's
+/// shape otherwise.
+///
+/// `cardinality` is asked about the pattern's constants only, since the values of the variables
+/// the input binds are not known at planning time. Its count is therefore scaled by the ratio the
+/// shape table gives between the positions the input will bind and the constants alone. That ratio
+/// is how much binding those positions is expected to shrink the result, and it leaves the count
+/// untouched when the input binds nothing new.
+fn estimate_quad_pattern_size(
+    subject: &TermPattern,
+    predicate: &NamedNodePattern,
+    object: &TermPattern,
+    graph_name: Option<&NamedNodePattern>,
+    input_types: &VariableTypes,
+    cardinality: &dyn CardinalityEstimator,
+) -> u64 {
+    let shape = estimate_triple_pattern_size(
+        is_term_pattern_bound(subject, input_types),
+        is_named_node_pattern_bound(predicate, input_types),
+        is_term_pattern_bound(object, input_types),
+    );
+    let subject = term_pattern_constant(subject);
+    let predicate = named_node_pattern_constant(predicate);
+    let object = term_pattern_constant(object);
+    let Some(measured) =
+        cardinality.quad_pattern_size(subject, predicate, object, graph_name_constant(graph_name))
+    else {
+        // With only the shape to go on, an `rdf:type` pattern scores one more than any other
+        // pattern of its shape, so that of two otherwise tied patterns it is joined later.
+        if predicate == Some(rdf::TYPE.as_ref()) {
+            return shape.saturating_add(1);
+        }
+        return shape;
+    };
+    if measured == 0 {
+        return 0;
+    }
+    let constants_shape =
+        estimate_triple_pattern_size(subject.is_some(), predicate.is_some(), object.is_some());
+    // At least 1: a pattern the dataset says matches something must not look free.
+    max(1, measured.saturating_mul(shape) / constants_shape)
+}
+
+/// The term at a pattern position when it is a constant, `None` when it is a variable.
+///
+/// Quoted triples are always `None`: they cannot be passed through [`CardinalityEstimator`], and
+/// patterns containing one are rare enough not to widen it for.
+fn term_pattern_constant(pattern: &TermPattern) -> Option<TermRef<'_>> {
+    match pattern {
+        TermPattern::NamedNode(term) => Some(term.as_ref().into()),
+        TermPattern::Literal(term) => Some(term.as_ref().into()),
+        TermPattern::Variable(_) => None,
+        #[cfg(feature = "sparql-12")]
+        TermPattern::Triple(_) => None,
+    }
+}
+
+fn named_node_pattern_constant(pattern: &NamedNodePattern) -> Option<NamedNodeRef<'_>> {
+    match pattern {
+        NamedNodePattern::NamedNode(node) => Some(node.as_ref()),
+        NamedNodePattern::Variable(_) => None,
+    }
+}
+
+/// Encodes a graph name the way [`CardinalityEstimator`] expects: `Some(None)` for the default
+/// graph, `Some(Some(_))` for a named graph and `None` when the graph is a variable.
+fn graph_name_constant(pattern: Option<&NamedNodePattern>) -> Option<Option<NamedNodeRef<'_>>> {
+    match pattern {
+        None => Some(None),
+        Some(NamedNodePattern::NamedNode(node)) => Some(Some(node.as_ref())),
+        Some(NamedNodePattern::Variable(_)) => None,
+    }
 }
 
 fn estimate_triple_pattern_size(
@@ -1542,6 +1708,7 @@ mod tests {
                 limit,
             ),
             &VariableTypes::default(),
+            &NoCardinalityEstimator,
         )
     }
 
